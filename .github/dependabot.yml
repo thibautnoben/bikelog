@@ -11,6 +11,10 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # @astrojs/check 0.9.x requires typescript ^5 || ^6. Remove once it supports TypeScript 7.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
