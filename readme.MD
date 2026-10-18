@@ -8,7 +8,9 @@ Bikes, kilometres and rides come from Strava; the app runs on Cloudflare Workers
 
 - Sign in with Strava. On Android, sign-in uses Strava's mobile OAuth endpoint, which opens the
   Strava app when it is installed (Strava's mobile web login otherwise). Your bikes (Strava *My Gear*) and their odometers are synced automatically
-  (at most every 30 minutes, or immediately with **Sync Strava**).
+  (at most every 30 minutes, or immediately with **Sync Strava**). A bike you retire (or delete) in
+  Strava is detected on the next sync and moved to *Retired bikes*, with its components and log kept;
+  un-retiring it in Strava brings it back.
 - For each bike you add components. A component remembers the bike odometer at install, so its
   distance is simply `current bike km − bike km at install (+ km already on it)`.
 - Install, replace, service and remove dates may lie in the past: the distance ridden on that bike

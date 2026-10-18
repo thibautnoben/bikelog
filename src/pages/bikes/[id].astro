@@ -11,6 +11,7 @@ import {
   deleteComponent,
   deleteEvent,
   eventsForBike,
+  firstRideDate,
   getBike,
   getComponent,
   monthlyTotalsByGear,
@@ -91,8 +92,15 @@ if (Astro.request.method === 'POST') {
   try {
     switch (str('intent')) {
       case 'add': {
-        const c = await newComponent(str('kind') ?? 'other', date('installed_on'));
-        await addComponent(c, `Installed ${kindLabel(c.kind)}${c.label ? ` (${c.label})` : ''}`);
+        if (str('installed_from') === 'start') {
+          // Original part: on the bike since it was new, so it has the bike's whole odometer.
+          const on = (await firstRideDate(athlete.id, bike.id)) ?? todayStr;
+          const c = { ...(await newComponent(str('kind') ?? 'other', todayStr)), installed_on: on, installed_odometer_m: 0, initial_m: 0 };
+          await addComponent(c, `Installed ${kindLabel(c.kind)}${c.label ? ` (${c.label})` : ''} (original part)`);
+        } else {
+          const c = await newComponent(str('kind') ?? 'other', date('installed_on'));
+          await addComponent(c, `Installed ${kindLabel(c.kind)}${c.label ? ` (${c.label})` : ''}`);
+        }
         break;
       }
       case 'replace': {
@@ -341,10 +349,17 @@ const kinds = Object.entries(COMPONENT_KINDS);
         <input name="label" placeholder="e.g. Shimano CN-M8100" />
       </label>
       <label>
+        Installed
+        <select name="installed_from">
+          <option value="date">On a date</option>
+          <option value="start">From the beginning (original part)</option>
+        </select>
+      </label>
+      <label data-installed-date>
         Installed on
         <input type="date" name="installed_on" value={todayStr} max={todayStr} />
       </label>
-      <label data-km>
+      <label data-km data-installed-date>
         Already used (km)
         <input name="initial_km" type="number" min="0" inputmode="numeric" value="0" />
       </label>
@@ -376,6 +391,8 @@ const kinds = Object.entries(COMPONENT_KINDS);
     </form>
     <p class="muted small">
       For a past install date, the distance ridden since then is calculated from your Strava activities on this bike.
+      An original part (from the beginning) counts the bike's whole odometer, and its days and battery hours from the
+      first ride on this bike.
       Electronic parts (shifters, derailleur, power meter, sensors) are tracked by battery only: battery life counts the hours ridden on this bike since the last change, not kilometres.
     </p>
   </section>
@@ -471,15 +488,24 @@ const kinds = Object.entries(COMPONENT_KINDS);
       set('lifespan_days', p.lifespanDays);
       set('service_interval_km', p.serviceIntervalKm);
       set('battery_interval_hours', p.batteryHours);
-      // Battery parts are tracked in hours only: hide (and so don't submit) the kilometre fields.
-      const battery = p.batteryHours != null;
-      form.querySelectorAll<HTMLElement>('[data-km]').forEach((label) => {
-        label.hidden = battery;
-        label.querySelector('input')!.disabled = battery;
+      toggle();
+    };
+    // Battery parts are tracked in hours only, and an original part has no install date or prior use:
+    // hide (and so don't submit) the fields that don't apply.
+    const toggle = () => {
+      const data = new FormData(form);
+      const battery = presets[String(data.get('kind'))]?.batteryHours != null;
+      const fromStart = data.get('installed_from') === 'start';
+      form.querySelectorAll<HTMLElement>('[data-km], [data-installed-date]').forEach((label) => {
+        const off = (battery && label.hasAttribute('data-km')) || (fromStart && label.hasAttribute('data-installed-date'));
+        label.hidden = off;
+        label.querySelector('input')!.disabled = off;
       });
     };
     form.addEventListener('change', (e) => {
-      if ((e.target as HTMLInputElement).name === 'kind') apply();
+      const name = (e.target as HTMLInputElement).name;
+      if (name === 'kind') apply();
+      else if (name === 'installed_from') toggle();
     });
     apply();
   }

@@ -107,6 +107,16 @@ export async function replaceBikes(
       )
       .bind(b.id, athleteId, b.name, b.distance, b.primary ? 1 : 0, b.retired ? 1 : 0, now),
   );
+  // Strava leaves retired (and deleted) gear out of the athlete's bikes, so a stored bike that is
+  // missing from the list has been retired. It is kept, with its components and log.
+  statements.push(
+    db()
+      .prepare(
+        `UPDATE bikes SET retired = 1, is_primary = 0, updated_at = ?2
+         WHERE athlete_id = ?1 AND retired = 0 AND id NOT IN (SELECT value FROM json_each(?3))`,
+      )
+      .bind(athleteId, now, JSON.stringify(bikes.map((b) => b.id))),
+  );
   statements.push(db().prepare('UPDATE athletes SET last_synced_at = ?2 WHERE id = ?1').bind(athleteId, now));
   await db().batch(statements);
 }
@@ -536,6 +546,15 @@ export async function oldestActivityDate(athleteId: number): Promise<string | nu
   const row = await db()
     .prepare('SELECT MIN(start_date) AS d FROM activities WHERE athlete_id = ?')
     .bind(athleteId)
+    .first<{ d: string | null }>();
+  return row?.d ?? null;
+}
+
+/** Local date (YYYY-MM-DD) of the first stored ride on a bike. */
+export async function firstRideDate(athleteId: number, bikeId: string): Promise<string | null> {
+  const row = await db()
+    .prepare('SELECT MIN(substr(start_date_local, 1, 10)) AS d FROM activities WHERE athlete_id = ?1 AND gear_id = ?2')
+    .bind(athleteId, bikeId)
     .first<{ d: string | null }>();
   return row?.d ?? null;
 }
