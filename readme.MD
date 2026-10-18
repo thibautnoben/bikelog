@@ -158,14 +158,31 @@ and gets their own separate data.
 
 ## Dependencies and vulnerabilities
 
-- `npm audit` checks every package in `package-lock.json`, indirect ones included, against GitHub's
-  advisory database. `npm audit fix` applies the upgrades that stay within the version ranges in
-  `package.json`.
-- To block deploys with known high or critical vulnerabilities, prefix the Workers Builds build command
-  with `npm audit --audit-level=high &&`. A newly published advisory then blocks deploys until the
-  package is upgraded.
-- Enable *Dependabot alerts* and *Dependabot security updates* in the GitHub repository
-  (*Settings → Code security*) to get alerts and fix PRs when a new advisory affects a dependency.
+Dependency fixes are released automatically:
+
+```text
+advisory or new release → Dependabot PR → CI passes → auto-merge → main → Workers Builds deploys
+```
+
+- **Dependabot** (`.github/dependabot.yml`) opens a PR right away when an advisory affects a
+  dependency, and weekly grouped PRs for npm packages and GitHub Actions. Version updates wait 7 days
+  after a release (`cooldown`); security updates do not.
+- **CI** (`.github/workflows/ci.yml`) runs on every PR: `npm ci`, `npm audit --audit-level=high`,
+  `npm run check` and `npm run test:budget`. It uses no secrets and deploys nothing.
+- **Auto-merge** (`.github/workflows/dependabot-automerge.yml`) enables auto-merge on Dependabot patch
+  and minor PRs. GitHub merges them once CI passes. Major updates stay open for review.
+- Actions are pinned to commit SHAs; Dependabot keeps them up to date.
+- `allowScripts` in `package.json` allows install scripts for `esbuild` and `workerd` by name, so
+  version bumps install without a new approval.
+
+Repository settings this relies on:
+
+- *Settings → Code security*: Dependabot alerts and Dependabot security updates on.
+- *Settings → General*: **Allow auto-merge** on.
+- *Settings → Branches* (or *Rules*): protect `main` and require the **check** status check (the CI job).
+
+CI only catches type errors, build failures, failed audits and size regressions; there are no runtime
+tests. Run `npm audit` locally to check at any time.
 
 ## Notes
 
