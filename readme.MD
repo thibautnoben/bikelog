@@ -72,6 +72,33 @@ npx wrangler secret put STRAVA_WEBHOOK_TOKEN  # another random string
 npm run deploy
 ```
 
+These steps are only needed once. After that, deploys happen on every push to `main` (below).
+
+### Continuous deployment (Workers Builds)
+
+The GitHub repository is connected to the Worker with
+[Cloudflare Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/)
+(*Workers & Pages → bikelog → Settings → Builds*). Every push to `main` builds and deploys:
+
+| Setting | Value |
+| --- | --- |
+| Branch | `main` |
+| Build command | `npm run check && npm run test:budget` |
+| Deploy command | `npm run db:migrate:remote && npx wrangler deploy` |
+| Root directory | `/` |
+
+- A failing type check or byte budget stops the build, so nothing is deployed.
+- Migrations run before the new code is deployed, so a migration must also work with the code that is
+  still live: add tables and columns freely, but split a drop or rename over two deploys.
+- The Worker name in Cloudflare must match `name` in `wrangler.jsonc`.
+- Builds use a custom API token (*My Profile → API Tokens*), selected under *Builds → API token*. The
+  token Cloudflare generates has no D1 access, so the migration step would fail with it. Permissions:
+  Account › Workers Scripts › Edit, Account › D1 › Edit, Account › Account Settings › Read,
+  User › User Details › Read, User › Memberships › Read.
+- Builds of other branches (preview versions) would run migrations against the production database.
+  Keep them disabled, or use a deploy command without the migration step for those branches.
+- Runtime secrets (`wrangler secret put`) live on the Worker and are not part of the build.
+
 ### Enable gear rules (Strava webhook)
 
 Gear rules need two things:
@@ -109,7 +136,7 @@ and gets their own separate data.
 | `npm run test:budget` | Build, then fail if JS, CSS or font bytes exceed their budgets (`scripts/perf/budget.mjs`) |
 | `npm run test:perf` | Lighthouse lab Core Web Vitals check against a running `npm run preview` (see below) |
 | `npm run preview` | Build and run with `wrangler dev` |
-| `npm run deploy` | Build and deploy |
+| `npm run deploy` | Build and deploy by hand (pushes to `main` deploy through Workers Builds) |
 | `npm run db:migrate:local` / `db:migrate:remote` | Apply D1 migrations |
 | `npm run cf-typegen` | Regenerate `worker-configuration.d.ts` after changing `wrangler.jsonc` |
 
@@ -128,6 +155,17 @@ and gets their own separate data.
   CLS, TBT (the lab stand-in for INP) or FCP miss the "good" thresholds. HTML reports go to `.lighthouse/`.
   Set `LH_ATHLETE_ID` to an athlete in the local D1 to audit the signed-in pages too; the script signs a
   session cookie with `SESSION_SECRET` from `.dev.vars`. It needs a Chrome/Chromium (`CHROME_PATH`).
+
+## Dependencies and vulnerabilities
+
+- `npm audit` checks every package in `package-lock.json`, indirect ones included, against GitHub's
+  advisory database. `npm audit fix` applies the upgrades that stay within the version ranges in
+  `package.json`.
+- To block deploys with known high or critical vulnerabilities, prefix the Workers Builds build command
+  with `npm audit --audit-level=high &&`. A newly published advisory then blocks deploys until the
+  package is upgraded.
+- Enable *Dependabot alerts* and *Dependabot security updates* in the GitHub repository
+  (*Settings → Code security*) to get alerts and fix PRs when a new advisory affects a dependency.
 
 ## Notes
 
