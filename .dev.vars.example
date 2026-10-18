@@ -1,0 +1,6 @@
+STRAVA_CLIENT_ID=12345
+STRAVA_CLIENT_SECRET=your-strava-client-secret
+# Any long random string, e.g. `openssl rand -hex 32`
+SESSION_SECRET=change-me
+# Random string; part of the Strava webhook URL (/webhook/strava/<token>) used by gear rules.
+STRAVA_WEBHOOK_TOKEN=change-me-too

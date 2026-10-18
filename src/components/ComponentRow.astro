@@ -1,0 +1,62 @@
+---
+import type { Component } from '../lib/db';
+import { componentStatus, formatKm, isBatteryKind, kindLabel } from '../lib/components';
+
+interface Props {
+  component: Component;
+  odometerM: number;
+  /** Riding seconds since the last battery change; see batteryRideSeconds(). */
+  batterySeconds?: number;
+}
+const { component: c, odometerM, batterySeconds = 0 } = Astro.props;
+const s = componentStatus(c, odometerM, batterySeconds);
+const pct = s.ratio == null ? 0 : Math.min(100, Math.round(s.ratio * 100));
+const badge = { ok: 'OK', soon: 'Soon', due: 'Due', none: '—' }[s.level];
+const reasonText =
+  { wear: 'replace', age: 'replace (age)', service: 'service', battery: 'battery' }[s.reason ?? ''] ?? '';
+const battery = isBatteryKind(c.kind);
+const details = [
+  battery ? null : formatKm(s.km) + (c.lifespan_km ? ` / ${formatKm(c.lifespan_km)}` : ''),
+  `${s.days} d` + (c.lifespan_days ? ` / ${c.lifespan_days} d` : ''),
+  c.service_interval_km && s.kmSinceService != null
+    ? `${formatKm(s.kmSinceService)} since service (every ${formatKm(c.service_interval_km)})`
+    : null,
+  s.hoursSinceBattery != null
+    ? `🔋 ${Math.round(s.hoursSinceBattery)} h` +
+      (c.battery_interval_hours ? ` / ${c.battery_interval_hours} h` : '') +
+      (c.battery_type ? ` (${c.battery_type})` : '')
+    : null,
+]
+  .filter(Boolean)
+  .join(' · ');
+---
+
+<div class={`row level-${s.level}`}>
+  <div class="head">
+    <span class="name"><strong>{kindLabel(c.kind)}</strong>{c.label && <span class="muted"> {c.label}</span>}</span>
+    <span class="badge" title={s.reason ?? ''}>{badge}{s.level !== 'ok' && s.level !== 'none' && ` · ${reasonText}`}</span>
+  </div>
+  <div class="bar"><span style={`width:${pct}%`}></span></div>
+  <div class="muted small">{details}</div>
+</div>
+
+<style>
+  .row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.5rem 0;
+  }
+  .head {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+  .head .badge {
+    flex-shrink: 0;
+  }
+  .small {
+    font-size: 0.8rem;
+  }
+</style>

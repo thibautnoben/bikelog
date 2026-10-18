@@ -1,0 +1,796 @@
+---
+import Layout from '../layouts/Layout.astro';
+import {
+  addPlace,
+  addRule,
+  cancelRuleJob,
+  deletePlace,
+  enqueueRuleJob,
+  failedRuleJobItems,
+  deleteRule,
+  listBikes,
+  listPlaces,
+  listRules,
+  moveRule,
+  recentAssignments,
+  ruleJobProgress,
+  setRuleEnabled,
+  updateRule,
+  type GearRule,
+  type Place,
+  type PowerMeterCondition,
+  type RuleFields,
+} from '../lib/db';
+import { RIDE_SPORT_TYPES, hasGearRulesScope, matchingRule, ruleChanges } from '../lib/gearRules';
+import { accessToken, activitiesSince, type StravaActivity } from '../lib/strava';
+import { processRuleJob } from '../lib/ruleJob';
+
+/** Periods offered for testing / applying rules to past rides. */
+const PREVIEW_PERIODS: Record<string, { label: string; days: number }> = {
+  '30d': { label: 'Last 30 days', days: 30 },
+  '90d': { label: 'Last 3 months', days: 90 },
+  '365d': { label: 'Last year', days: 365 },
+};
+const periodStart = (key: string) =>
+  Math.floor(Date.now() / 1000) - (PREVIEW_PERIODS[key] ?? PREVIEW_PERIODS['30d']).days * 86_400;
+
+const athlete = Astro.locals.athlete!;
+const canWrite = hasGearRulesScope(athlete);
+let error: string | null = null;
+
+const bikes = await listBikes(athlete.id);
+const bikeName = (id: string | null) => (id ? (bikes.find((b) => b.id === id)?.name ?? id) : '—');
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const str = (name: string) => {
+    const v = form.get(name);
+    return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : null;
+  };
+  const int = (name: string) => {
+    const n = Number(str(name));
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  };
+  /** Longer free text (descriptions, notes), line breaks kept. */
+  const text = (name: string) => {
+    const v = form.get(name);
+    return typeof v === 'string' && v.trim() ? v.trim().replace(/\r\n/g, '\n').slice(0, 2000) : null;
+  };
+  const places = await listPlaces(athlete.id);
+  const ownPlace = (name: string) => {
+    const id = int(name);
+    if (id != null && !places.some((p) => p.id === id)) throw new Error('Unknown place');
+    return id;
+  };
+
+  try {
+    switch (str('intent')) {
+      case 'add_place': {
+        const [lat, lng] = (str('coordinates') ?? '').split(/[,\s]+/).map(Number);
+        if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) throw new Error('Enter coordinates as "lat, lng", e.g. 51.0543, 3.7174');
+        const radius = Math.min(5000, Math.max(50, int('radius_m') ?? 300));
+        await addPlace(athlete.id, { name: str('name') ?? 'Place', lat, lng, radius_m: radius });
+        break;
+      }
+      case 'delete_place':
+        if (!(await deletePlace(athlete.id, int('place_id') ?? 0))) throw new Error('This place is still used by a rule.');
+        break;
+      case 'add_rule':
+      case 'update_rule': {
+        // Each action is applied only when its checkbox is ticked.
+        const on = (action: string) => form.get(`do_${action}`) === '1';
+        const gearId = on('gear') ? str('gear_id') : null;
+        if (gearId && !bikes.some((b) => b.id === gearId)) throw new Error('Unknown bike');
+        const power = str('power_meter');
+        const sport = str('sport_type');
+        const rule: RuleFields = {
+          name: str('name'),
+          start_place_id: ownPlace('start_place_id'),
+          end_place_id: ownPlace('end_place_id'),
+          power_meter: (['yes', 'no'].includes(power ?? '') ? power : 'any') as PowerMeterCondition,
+          sport_type: sport && RIDE_SPORT_TYPES.includes(sport) ? sport : null,
+          gear_id: gearId,
+          mark_commute: on('commute') ? 1 : 0,
+          set_name: on('name') ? str('set_name') : null,
+          set_description: on('description') ? text('set_description') : null,
+          set_private_note: on('private_note') ? text('set_private_note') : null,
+        };
+        if (!rule.gear_id && !rule.mark_commute && !rule.set_name && !rule.set_description && !rule.set_private_note) {
+          throw new Error('Choose at least one field for the rule to change (and fill in its value).');
+        }
+        if (str('intent') === 'add_rule') await addRule(athlete.id, rule);
+        else await updateRule(athlete.id, int('rule_id') ?? 0, rule);
+        break;
+      }
+      case 'toggle_rule':
+        await setRuleEnabled(athlete.id, int('rule_id') ?? 0, str('enabled') === '1');
+        break;
+      case 'move_rule':
+        await moveRule(athlete.id, int('rule_id') ?? 0, str('direction') === 'up' ? -1 : 1);
+        break;
+      case 'delete_rule':
+        await deleteRule(athlete.id, int('rule_id') ?? 0);
+        break;
+      case 'apply': {
+        // Queue the selected rides; they're processed in batches within Strava's rate limits.
+        if (!canWrite) throw new Error('Reconnect Strava to allow changing activities.');
+        const selected = new Set(form.getAll('activity_id').map(Number));
+        const [rules, activities] = await Promise.all([
+          listRules(athlete.id),
+          activitiesSince(await accessToken(athlete), periodStart(str('period') ?? '30d')),
+        ]);
+        const items = activities
+          .filter((a) => selected.has(a.id))
+          .map((activity) => ({ activity, rule: matchingRule(rules, places, activity) }))
+          .flatMap(({ activity, rule }) => (rule ? [{ activity, ruleId: rule.id }] : []));
+        await enqueueRuleJob(athlete.id, items);
+        Astro.locals.cfContext.waitUntil(processRuleJob(athlete.id, 25_000).catch((e) => console.error('Rule job failed:', e)));
+        return Astro.redirect('/rules#job', 303);
+      }
+      case 'cancel_job':
+        await cancelRuleJob(athlete.id, true);
+        break;
+      case 'clear_job':
+        await cancelRuleJob(athlete.id, false);
+        break;
+    }
+    return Astro.redirect('/rules', 303);
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+const [job, failedItems] = await Promise.all([ruleJobProgress(athlete.id), failedRuleJobItems(athlete.id)]);
+const fmtTime = (unix: number) =>
+  new Date(unix * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Brussels' });
+
+const [places, rules, assignments] = await Promise.all([
+  listPlaces(athlete.id),
+  listRules(athlete.id),
+  recentAssignments(athlete.id),
+]);
+const placeName = (id: number | null) => places.find((p) => p.id === id)?.name ?? '?';
+const ruleName = (id: number | null) => {
+  const r = rules.find((r) => r.id === id);
+  return r ? (r.name ?? `Rule #${r.position}`) : 'deleted rule';
+};
+
+const editing = rules.find((r) => r.id === Number(Astro.url.searchParams.get('edit'))) ?? null;
+
+const FIELD_LABELS: Record<string, string> = {
+  gear: 'bike',
+  commute: 'commute',
+  name: 'title',
+  description: 'description',
+  private_note: 'private note',
+};
+
+/** What a rule changes, e.g. ['bike → Commuter', 'commute', 'title “Morning commute”']. */
+function actions(r: GearRule): string[] {
+  const list: string[] = [];
+  if (r.gear_id) list.push(`bike → ${bikeName(r.gear_id)}`);
+  if (r.mark_commute) list.push('commute');
+  if (r.set_name) list.push(`title “${r.set_name}”`);
+  if (r.set_description) list.push('description');
+  if (r.set_private_note) list.push('private note');
+  return list;
+}
+
+function describe(r: GearRule): string {
+  const parts: string[] = [];
+  if (r.sport_type) parts.push(r.sport_type);
+  if (r.start_place_id != null) parts.push(`starts at ${placeName(r.start_place_id)}`);
+  if (r.end_place_id != null) parts.push(`ends at ${placeName(r.end_place_id)}`);
+  if (r.power_meter === 'yes') parts.push('with power meter');
+  if (r.power_meter === 'no') parts.push('without power meter');
+  return parts.length ? parts.join(', ') : 'any ride';
+}
+
+const previewParam = Astro.url.searchParams.get('preview');
+const showPreview = previewParam != null;
+const previewPeriod = previewParam && PREVIEW_PERIODS[previewParam] ? previewParam : '30d';
+let preview: { activity: StravaActivity; rule: GearRule | null }[] = [];
+if (showPreview) {
+  try {
+    const activities = await activitiesSince(await accessToken(athlete), periodStart(previewPeriod));
+    preview = activities
+      .filter((a) => RIDE_SPORT_TYPES.includes(a.sport_type))
+      .map((activity) => ({ activity, rule: matchingRule(rules, places, activity) }));
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+}
+const changeLabels = (fields: string) =>
+  fields
+    .split(',')
+    .filter(Boolean)
+    .map((f) => FIELD_LABELS[f] ?? f);
+const fmtLatLng = (ll: [number, number] | []) => (ll.length === 2 ? `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}` : null);
+const activeBikes = bikes.filter((b) => !b.retired);
+---
+
+<Layout title="Rules">
+  <h1>Rules</h1>
+  <p class="muted">
+    When a new ride is uploaded to Strava, the first matching rule updates it: bike, commute, title, description
+    and/or private note — you choose which. All conditions of a rule must match; leave a condition on “any” to ignore
+    it.
+  </p>
+  {
+    !canWrite && (
+      <p class="alert">
+        Changing activities on Strava needs extra permission. <a href="/auth/login">Reconnect Strava</a> and allow
+        “Upload your activities”.
+      </p>
+    )
+  }
+  {error && <p class="alert">{error}</p>}
+
+  {
+    job && (
+      <section class="card" id="job" data-pending={job.pending} data-paused={job.pausedUntil ?? ''}>
+        <h2>Applying rules to past rides</h2>
+        <div class="bar job-bar">
+          <span style={`width:${Math.round(((job.total - job.pending) / job.total) * 100)}%`} />
+        </div>
+        <p>
+          <strong class="job-done">{job.total - job.pending}</strong> of {job.total} rides processed:{' '}
+          {job.changed} changed, {job.unchanged} already up to date{job.failed > 0 && <>, {job.failed} failed</>}.
+        </p>
+        {job.pending > 0 && job.pausedUntil && (
+          <p class="muted">
+            Paused by Strava's rate limit; continues automatically after {fmtTime(job.pausedUntil)}.
+          </p>
+        )}
+        {job.pending > 0 && !job.pausedUntil && (
+          <p class="muted">Working… keep this page open to go faster; it also continues when you browse the app.</p>
+        )}
+        {failedItems.length > 0 && (
+          <ul class="small failed">
+            {failedItems.map((f) => (
+              <li>
+                <a href={`https://www.strava.com/activities/${f.activity_id}`} target="_blank" rel="noopener">
+                  {f.activity_id}
+                </a>
+                : {f.error}
+              </li>
+            ))}
+          </ul>
+        )}
+        <form method="post">
+          {job.pending > 0 ? (
+            <button class="secondary" name="intent" value="cancel_job">Stop</button>
+          ) : (
+            <button class="secondary" name="intent" value="clear_job">Done</button>
+          )}
+        </form>
+      </section>
+    )
+  }
+
+
+  <section class="card">
+    <h2>Your rules</h2>
+    {rules.length === 0 && <p class="muted">No rules yet.</p>}
+    {
+      rules.length > 0 && (
+        <ol class="rule-list">
+          {rules.map((r, i) => (
+            <li class={r.enabled ? '' : 'disabled'}>
+              <div class="rule-text">
+                <strong>
+                  {i + 1}. {r.name ?? 'Rule'}
+                </strong>
+                {!r.enabled && <span class="muted"> (disabled)</span>}
+                <div>{describe(r)} →</div>
+                <div class="tags">
+                  {actions(r).map((a) => (
+                    <span class="action-tag">{a}</span>
+                  ))}
+                  {actions(r).length === 0 && <span class="muted">changes nothing (its bike was deleted)</span>}
+                </div>
+              </div>
+              <div class="buttons">
+                <a class="link-button" href={`/rules?edit=${r.id}#rule-form`}>Edit</a>
+                <form method="post">
+                  <input type="hidden" name="intent" value="move_rule" />
+                  <input type="hidden" name="rule_id" value={r.id} />
+                  <button class="link" name="direction" value="up" disabled={i === 0} aria-label="Move up">↑</button>
+                  <button class="link" name="direction" value="down" disabled={i === rules.length - 1} aria-label="Move down">↓</button>
+                </form>
+                <form method="post">
+                  <input type="hidden" name="intent" value="toggle_rule" />
+                  <input type="hidden" name="rule_id" value={r.id} />
+                  <input type="hidden" name="enabled" value={r.enabled ? '0' : '1'} />
+                  <button class="link">{r.enabled ? 'Disable' : 'Enable'}</button>
+                </form>
+                <form method="post" data-confirm="Delete this rule?">
+                  <input type="hidden" name="intent" value="delete_rule" />
+                  <input type="hidden" name="rule_id" value={r.id} />
+                  <button class="link" aria-label="Delete rule">✕</button>
+                </form>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )
+    }
+
+    <h3 id="rule-form">{editing ? `Edit rule “${editing.name ?? 'Rule'}”` : 'Add rule'}</h3>
+    <form method="post" class="rule-form">
+      <input type="hidden" name="intent" value={editing ? 'update_rule' : 'add_rule'} />
+      {editing && <input type="hidden" name="rule_id" value={editing.id} />}
+      <div class="form-grid">
+        <label>
+          Name
+          <input name="name" placeholder="e.g. Commute" value={editing?.name ?? ''} />
+        </label>
+      </div>
+
+      <fieldset>
+        <legend>When</legend>
+        <div class="form-grid">
+          <label>
+            Ride type
+            <select name="sport_type">
+              <option value="">Any</option>
+              {RIDE_SPORT_TYPES.map((t) => <option value={t} selected={editing?.sport_type === t}>{t}</option>)}
+            </select>
+          </label>
+          <label>
+            Start location
+            <select name="start_place_id">
+              <option value="">Anywhere</option>
+              {places.map((p) => <option value={p.id} selected={editing?.start_place_id === p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <label>
+            End location
+            <select name="end_place_id">
+              <option value="">Anywhere</option>
+              {places.map((p) => <option value={p.id} selected={editing?.end_place_id === p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <label>
+            Power meter
+            <select name="power_meter">
+              <option value="any">Doesn't matter</option>
+              <option value="yes" selected={editing?.power_meter === 'yes'}>Present</option>
+              <option value="no" selected={editing?.power_meter === 'no'}>Absent</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Then change</legend>
+        <div class="action">
+          <label class="checkbox">
+            <input type="checkbox" name="do_gear" value="1" checked={editing ? !!editing.gear_id : true} />
+            Bike
+          </label>
+          <select name="gear_id" data-action="do_gear" aria-label="Bike">
+            {activeBikes.map((b) => <option value={b.id} selected={editing?.gear_id === b.id}>{b.name}</option>)}
+          </select>
+        </div>
+        <div class="action">
+          <label class="checkbox">
+            <input type="checkbox" name="do_commute" value="1" checked={!!editing?.mark_commute} />
+            Mark as commute
+          </label>
+        </div>
+        <div class="action">
+          <label class="checkbox">
+            <input type="checkbox" name="do_name" value="1" checked={!!editing?.set_name} />
+            Title
+          </label>
+          <input name="set_name" data-action="do_name" aria-label="Title" placeholder="e.g. Morning commute" value={editing?.set_name ?? ''} />
+        </div>
+        <div class="action">
+          <label class="checkbox">
+            <input type="checkbox" name="do_description" value="1" checked={!!editing?.set_description} />
+            Description
+          </label>
+          <textarea name="set_description" data-action="do_description" aria-label="Description" rows="2" placeholder="Replaces the existing description">{editing?.set_description ?? ''}</textarea>
+        </div>
+        <div class="action">
+          <label class="checkbox">
+            <input type="checkbox" name="do_private_note" value="1" checked={!!editing?.set_private_note} />
+            Private note
+          </label>
+          <textarea name="set_private_note" data-action="do_private_note" aria-label="Private note" rows="2" placeholder="Only visible to you">{editing?.set_private_note ?? ''}</textarea>
+        </div>
+        <p class="muted small">
+          Private notes are experimental: Strava doesn't document them in its API. If Strava ignores the note, the
+          change log below says so.
+        </p>
+      </fieldset>
+
+      <div class="form-buttons">
+        <button type="submit">{editing ? 'Save rule' : 'Add rule'}</button>
+        {editing && <a href="/rules">Cancel</a>}
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Places</h2>
+    {
+      places.length > 0 && (
+        <table>
+          <tbody>
+            {places.map((p: Place) => (
+              <tr>
+                <td>{p.name}</td>
+                <td>
+                  <a href={`https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lng}#map=16/${p.lat}/${p.lng}`} target="_blank" rel="noopener">
+                    {p.lat.toFixed(5)}, {p.lng.toFixed(5)}
+                  </a>
+                </td>
+                <td>within {p.radius_m} m</td>
+                <td>
+                  <form method="post" data-confirm="Delete this place?">
+                    <input type="hidden" name="intent" value="delete_place" />
+                    <input type="hidden" name="place_id" value={p.id} />
+                    <button class="link" aria-label="Delete place">✕</button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )
+    }
+    <h3>Add place</h3>
+    <form method="post" class="form-grid" id="place-form">
+      <input type="hidden" name="intent" value="add_place" />
+      <label>
+        Name
+        <input name="name" id="place-name" required placeholder="e.g. Home, Office" />
+      </label>
+      <label>
+        Coordinates (lat, lng)
+        <input name="coordinates" id="place-coordinates" required inputmode="decimal" placeholder="51.0543, 3.7174" />
+      </label>
+      <label>
+        Radius (m)
+        <input name="radius_m" type="number" min="50" max="5000" inputmode="numeric" value="300" />
+      </label>
+      <button type="submit">Add place</button>
+    </form>
+    <p class="muted small">
+      Copy coordinates from Google Maps or OpenStreetMap (right-click a spot), or use the start/end of a recent ride in
+      the preview below. Strava privacy zones hide the exact start and end, so pick a radius larger than your privacy
+      zone around those places.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Test on past rides</h2>
+    <form method="get" class="inline-form period-form">
+      <label>
+        Period
+        <select name="preview">
+          {Object.entries(PREVIEW_PERIODS).map(([key, p]) => (
+            <option value={key} selected={showPreview && key === previewPeriod}>{p.label}</option>
+          ))}
+        </select>
+      </label>
+      <button type="submit" class="secondary">Load rides</button>
+    </form>
+    {
+      !showPreview ? null : preview.length === 0 ? (
+        <p class="muted">No rides in this period.</p>
+      ) : (
+        <form method="post">
+          <input type="hidden" name="intent" value="apply" />
+          <input type="hidden" name="period" value={previewPeriod} />
+          <p class="muted small">
+            {preview.length} rides, {preview.filter((p) => p.rule).length} matching a rule.{' '}
+            <button type="button" class="link select-all" data-checked="true">Select all</button> ·{' '}
+            <button type="button" class="link select-all" data-checked="false">Select none</button>
+          </p>
+          <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th />
+                <th>Date</th>
+                <th>Ride</th>
+                <th>Start / end</th>
+                <th>Power</th>
+                <th>Current bike</th>
+                <th>Rule → changes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.map(({ activity: a, rule }) => {
+                const changes = rule ? ruleChanges(rule, a) : {};
+                const change = Object.keys(changes).length > 0;
+                const start = fmtLatLng(a.start_latlng);
+                const end = fmtLatLng(a.end_latlng);
+                return (
+                  <tr class={change ? 'change' : ''}>
+                    <td>{rule && <input type="checkbox" name="activity_id" value={a.id} checked={change} aria-label={`Apply to ${a.name}`} />}</td>
+                    <td>{a.start_date.slice(0, 10)}</td>
+                    <td>
+                      <a href={`https://www.strava.com/activities/${a.id}`} target="_blank" rel="noopener">{a.name}</a>
+                      <div class="muted small">{a.sport_type}</div>
+                    </td>
+                    <td class="small">
+                      {start && <button type="button" class="link use-place" data-latlng={start}>start</button>}
+                      {end && <> / <button type="button" class="link use-place" data-latlng={end}>end</button></>}
+                    </td>
+                    <td>{a.device_watts ? 'Yes' : 'No'}</td>
+                    <td>{bikeName(a.gear_id)}</td>
+                    <td>
+                      {rule ? (
+                        <>
+                          {rule.name ?? `#${rules.indexOf(rule) + 1}`}
+                          <div class="tags">
+                            {change ? (
+                              Object.keys(changes).map((k) => (
+                                <span class="action-tag">
+                                  {k === 'gear_id' ? `bike → ${bikeName(rule.gear_id)}` : FIELD_LABELS[k] ?? k}
+                                </span>
+                              ))
+                            ) : (
+                              <span class="muted small">already up to date</span>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <span class="muted">no match</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+          <p>
+            {preview.some((p) => p.rule) ? (
+              <button type="submit" disabled={!canWrite || !!(job && job.pending > 0)}>Apply to selected rides</button>
+            ) : (
+              <span class="muted">None of these rides match a rule.</span>
+            )}
+          </p>
+          {job && job.pending > 0 && <p class="muted small">Wait for the current run to finish or stop it first.</p>}
+          <p class="muted small">
+            Large selections are applied in batches within Strava's rate limits (about 200 changes per 15 minutes).
+            Rides with a change are selected. Descriptions and private notes aren't in Strava's activity list, so they
+            show as changes until applied; when applying, each ride is checked first and unchanged fields are skipped.
+          </p>
+        </form>
+      )
+    }
+  </section>
+
+  <section class="card">
+    <h2>Recent changes</h2>
+    {assignments.length === 0 && <p class="muted">None yet.</p>}
+    {
+      assignments.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Ride</th>
+              <th>Change</th>
+              <th>By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {assignments.map((x) => (
+              <tr>
+                <td>
+                  <a href={`https://www.strava.com/activities/${x.activity_id}`} target="_blank" rel="noopener">{x.activity_name ?? x.activity_id}</a>
+                  <div class="muted small">{x.activity_date}</div>
+                </td>
+                <td>
+                  <div class="tags">
+                    {changeLabels(x.changed_fields ?? '').map((f) => (
+                      <span class="action-tag">
+                        {f === 'bike' ? `${bikeName(x.from_gear_id)} → ${bikeName(x.to_gear_id)}` : f}
+                      </span>
+                    ))}
+                  </div>
+                  {x.warning && <div class="warning small">⚠ {x.warning}</div>}
+                </td>
+                <td>
+                  {ruleName(x.rule_id)} <span class="muted small">({x.source === 'webhook' ? 'on upload' : 'manual'})</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )
+    }
+  </section>
+</Layout>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>('button.select-all').forEach((b) =>
+    b.addEventListener('click', () => {
+      document
+        .querySelectorAll<HTMLInputElement>('input[name="activity_id"]')
+        .forEach((box) => (box.checked = b.dataset.checked === 'true'));
+    }),
+  );
+
+  // While a run is in progress, keep it moving and refresh the page when something changes.
+  const job = document.getElementById('job');
+  if (job && Number(job.dataset.pending) > 0) {
+    const pausedUntil = Number(job.dataset.paused) * 1000;
+    const delay = pausedUntil > Date.now() ? pausedUntil - Date.now() + 5000 : 1500;
+    setTimeout(async () => {
+      try {
+        await fetch('/rules/job', { method: 'POST' });
+      } finally {
+        location.reload();
+      }
+    }, delay);
+  }
+
+  // Typing a value for an action ticks that action's checkbox.
+  document.querySelectorAll<HTMLInputElement>('[data-action]').forEach((field) =>
+    field.addEventListener('input', () => {
+      const box = document.querySelector<HTMLInputElement>(`input[name="${field.dataset.action}"]`);
+      if (box) box.checked = true;
+    }),
+  );
+
+  document.querySelectorAll<HTMLButtonElement>('button.use-place').forEach((b) =>
+    b.addEventListener('click', () => {
+      (document.getElementById('place-coordinates') as HTMLInputElement).value = b.dataset.latlng ?? '';
+      const name = document.getElementById('place-name') as HTMLInputElement;
+      name.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      name.focus();
+    }),
+  );
+
+  document.querySelectorAll<HTMLFormElement>('form[data-confirm]').forEach((f) =>
+    f.addEventListener('submit', (e) => {
+      if (!confirm(f.dataset.confirm)) e.preventDefault();
+    }),
+  );
+</script>
+
+<style>
+  section {
+    margin-bottom: 1.25rem;
+  }
+  h3 {
+    margin-top: 1.5rem;
+    font-size: 1rem;
+  }
+  .small {
+    font-size: 0.8rem;
+  }
+  .buttons {
+    display: flex;
+    gap: 0.75rem;
+    white-space: nowrap;
+  }
+  .buttons form {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .rule-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .rule-list li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .rule-list li.disabled .rule-text {
+    opacity: 0.5;
+  }
+  .rule-text {
+    flex: 1 1 260px;
+  }
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.2rem;
+  }
+  .action-tag {
+    font-size: 0.75rem;
+    padding: 0.05rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* In table cells max-width can't cap a tag, so long ones (e.g. "Old bike → New bike") wrap instead of widening the page. */
+  td .action-tag {
+    white-space: normal;
+    overflow-wrap: break-word;
+    border-radius: 0.6rem;
+  }
+  .warning {
+    color: var(--soon);
+    margin-top: 0.2rem;
+  }
+  .job-bar {
+    --level: var(--accent);
+    height: 8px;
+    margin: 0.5rem 0;
+  }
+  .failed {
+    color: var(--muted);
+  }
+  .period-form {
+    margin-bottom: 0.75rem;
+  }
+  .period-form label {
+    flex: 0 1 220px;
+  }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem 1rem;
+    margin: 1rem 0 0;
+  }
+  legend {
+    padding: 0 0.4rem;
+    font-family: var(--mono);
+    font-weight: 600;
+  }
+  .action {
+    display: grid;
+    grid-template-columns: minmax(9rem, auto) 1fr;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    padding: 0.35rem 0;
+  }
+  .action > label.checkbox {
+    grid-column: 1;
+  }
+  @media (max-width: 640px) {
+    .action {
+      grid-template-columns: 1fr;
+    }
+  }
+  .form-buttons {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-top: 1rem;
+  }
+  .link-button {
+    color: var(--muted);
+    padding: 0.5rem;
+  }
+  label.checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  label.checkbox input {
+    min-height: 0;
+    width: 1.2rem;
+    height: 1.2rem;
+    accent-color: var(--accent);
+  }
+  tr.change td {
+    background: color-mix(in srgb, var(--soon) 10%, transparent);
+  }
+  .secondary-button {
+    background: transparent;
+    color: var(--accent);
+  }
+</style>

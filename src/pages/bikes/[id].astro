@@ -1,0 +1,535 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import ComponentRow from '../../components/ComponentRow.astro';
+import MonthlyChart from '../../components/MonthlyChart.astro';
+import {
+  addComponent,
+  addNote,
+  batteryRideSeconds,
+  changeBattery,
+  componentsForBike,
+  deleteComponent,
+  deleteEvent,
+  eventsForBike,
+  getBike,
+  getComponent,
+  monthlyTotalsByGear,
+  removeComponent,
+  serviceComponent,
+  updateComponent,
+  type NewComponent,
+} from '../../lib/db';
+import {
+  COMPONENT_KINDS,
+  NO_KM_LIMITS,
+  componentStatus,
+  formatKm,
+  isBatteryKind,
+  kindLabel,
+  today,
+} from '../../lib/components';
+import { odometerOn, syncStrava } from '../../lib/sync';
+import { lastMonths } from '../../lib/periods';
+
+const athlete = Astro.locals.athlete!;
+const bikeId = Astro.params.id!;
+
+let error: string | null = null;
+try {
+  await syncStrava(athlete, false, (p) => Astro.locals.cfContext.waitUntil(p));
+} catch (e) {
+  error = `Could not sync with Strava: ${e instanceof Error ? e.message : e}`;
+}
+
+const bike = await getBike(athlete.id, bikeId);
+if (!bike) return new Response('Bike not found', { status: 404 });
+
+const todayStr = today();
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const str = (name: string) => {
+    const v = form.get(name);
+    return typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : null;
+  };
+  const num = (name: string) => {
+    const v = str(name);
+    const n = v == null ? NaN : Number(v.replace(',', '.'));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const date = (name: string) => {
+    const v = str(name);
+    if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))) return todayStr;
+    return v > todayStr ? todayStr : v;
+  };
+  const component = async () => {
+    const id = num('component_id');
+    const c = id == null ? null : await getComponent(bike.id, id);
+    if (!c) throw new Error('Component not found');
+    return c;
+  };
+  const newComponent = async (rawKind: string, on: string): Promise<NewComponent> => {
+    const kind = Object.hasOwn(COMPONENT_KINDS, rawKind) ? rawKind : 'other';
+    const battery = isBatteryKind(kind);
+    return {
+      bike_id: bike.id,
+      kind,
+      label: str('label'),
+      installed_on: on,
+      installed_odometer_m: await odometerOn(athlete, bike, on),
+      initial_m: battery ? 0 : (num('initial_km') ?? 0) * 1000,
+      lifespan_km: num('lifespan_km'),
+      lifespan_days: num('lifespan_days'),
+      service_interval_km: num('service_interval_km'),
+      battery_type: str('battery_type'),
+      battery_interval_hours: num('battery_interval_hours'),
+      notes: str('notes'),
+      ...(battery && NO_KM_LIMITS),
+    };
+  };
+
+  try {
+    switch (str('intent')) {
+      case 'add': {
+        const c = await newComponent(str('kind') ?? 'other', date('installed_on'));
+        await addComponent(c, `Installed ${kindLabel(c.kind)}${c.label ? ` (${c.label})` : ''}`);
+        break;
+      }
+      case 'replace': {
+        const old = await component();
+        const on = date('on');
+        const fresh = await newComponent(old.kind, on);
+        fresh.label ??= old.label;
+        fresh.lifespan_km ??= old.lifespan_km;
+        fresh.lifespan_days ??= old.lifespan_days;
+        fresh.service_interval_km ??= old.service_interval_km;
+        fresh.battery_type ??= old.battery_type;
+        fresh.battery_interval_hours ??= old.battery_interval_hours;
+        if (isBatteryKind(fresh.kind)) Object.assign(fresh, NO_KM_LIMITS);
+        const km = Math.round(componentStatus({ ...old, removed_odometer_m: fresh.installed_odometer_m, removed_on: on }, 0).km);
+        await removeComponent(old, on, fresh.installed_odometer_m, `Replaced ${kindLabel(old.kind)} after ${km} km`, {
+          component: fresh,
+          description: `Installed new ${kindLabel(fresh.kind)}${fresh.label ? ` (${fresh.label})` : ''}`,
+        });
+        break;
+      }
+      case 'remove': {
+        const old = await component();
+        const on = date('on');
+        await removeComponent(old, on, await odometerOn(athlete, bike, on), `Removed ${kindLabel(old.kind)}`);
+        break;
+      }
+      case 'service': {
+        const c = await component();
+        const on = date('on');
+        await serviceComponent(c, on, await odometerOn(athlete, bike, on), str('description') ?? `Serviced ${kindLabel(c.kind)}`);
+        break;
+      }
+      case 'battery': {
+        const c = await component();
+        const on = date('on');
+        const battery = str('battery_type') ?? c.battery_type;
+        await changeBattery(
+          c,
+          on,
+          await odometerOn(athlete, bike, on),
+          `Changed battery of ${kindLabel(c.kind)}${battery ? ` (${battery})` : ''}`,
+        );
+        break;
+      }
+      case 'edit': {
+        const c = await component();
+        await updateComponent(c, {
+          label: str('label'),
+          lifespan_km: num('lifespan_km'),
+          lifespan_days: num('lifespan_days'),
+          service_interval_km: num('service_interval_km'),
+          battery_type: str('battery_type'),
+          battery_interval_hours: num('battery_interval_hours'),
+          notes: str('notes'),
+          ...(isBatteryKind(c.kind) && NO_KM_LIMITS),
+        });
+        break;
+      }
+      case 'delete':
+        await deleteComponent(await component());
+        break;
+      case 'note': {
+        const on = date('on');
+        const text = str('description');
+        if (text) await addNote(bike.id, on, await odometerOn(athlete, bike, on), text);
+        break;
+      }
+      case 'delete_event': {
+        const id = num('event_id');
+        if (id != null) await deleteEvent(bike.id, id);
+        break;
+      }
+    }
+    return Astro.redirect(`/bikes/${bike.id}`, 303);
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+const months = lastMonths(6);
+// Independent queries: run them in parallel so the page waits for one D1 round trip, not four.
+const [components, batterySeconds, events, totalsByGear] = await Promise.all([
+  componentsForBike(bike.id),
+  batteryRideSeconds(athlete.id, bike.id),
+  eventsForBike(bike.id),
+  monthlyTotalsByGear(athlete.id, months),
+]);
+const totals = totalsByGear.get(bike.id);
+const urgency = (c: (typeof components)[number]) =>
+  componentStatus(c, bike.odometer_m, batterySeconds.get(c.id)).ratio ?? -1;
+const active = components.filter((c) => !c.removed_on).sort((a, b) => urgency(b) - urgency(a));
+const removed = components.filter((c) => c.removed_on);
+const kinds = Object.entries(COMPONENT_KINDS);
+---
+
+<Layout title={bike.name}>
+  <p><a href="/">← All bikes</a></p>
+  <h1>{bike.name} {bike.retired ? <span class="muted">(retired)</span> : null}</h1>
+  <p class="muted">{formatKm(bike.odometer_m / 1000)} total on Strava</p>
+  <section class="card">
+    <h2>Riding</h2>
+    <MonthlyChart months={months} totals={totals} height={160} />
+  </section>
+  {error && <p class="alert">{error}</p>}
+
+  <section class="card">
+    <h2>Components</h2>
+    {active.length === 0 && <p class="muted">Nothing tracked yet — add a component below.</p>}
+    {
+      active.map((c) => (
+        <div class="component">
+          <ComponentRow component={c} odometerM={bike.odometer_m} batterySeconds={batterySeconds.get(c.id)} />
+          {c.notes && <p class="muted small">{c.notes}</p>}
+          <div class="actions">
+            {c.service_interval_km && (
+              <form method="post">
+                <input type="hidden" name="intent" value="service" />
+                <input type="hidden" name="component_id" value={c.id} />
+                <button type="submit" class="secondary">✓ Serviced today</button>
+              </form>
+            )}
+            {(c.battery_interval_hours || c.battery_type) && (
+              <form method="post">
+                <input type="hidden" name="intent" value="battery" />
+                <input type="hidden" name="component_id" value={c.id} />
+                <button type="submit" class="secondary">🔋 Battery changed today</button>
+              </form>
+            )}
+            <details class="more">
+              <summary>More…</summary>
+              <div class="more-body">
+                {c.service_interval_km && (
+                  <form method="post" class="inline-form">
+                    <input type="hidden" name="intent" value="service" />
+                    <input type="hidden" name="component_id" value={c.id} />
+                    <label>
+                      Serviced on
+                      <input type="date" name="on" value={todayStr} max={todayStr} />
+                    </label>
+                    <label>
+                      What
+                      <input name="description" placeholder="Lubed / waxed / cleaned" />
+                    </label>
+                    <button type="submit" class="secondary">Log service</button>
+                  </form>
+                )}
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="intent" value="battery" />
+                  <input type="hidden" name="component_id" value={c.id} />
+                  <label>
+                    Battery changed on
+                    <input type="date" name="on" value={todayStr} max={todayStr} />
+                  </label>
+                  <label>
+                    Battery
+                    <input name="battery_type" placeholder={c.battery_type ?? 'e.g. CR2032'} />
+                  </label>
+                  <button type="submit" class="secondary">Log battery change</button>
+                </form>
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="intent" value="replace" />
+                  <input type="hidden" name="component_id" value={c.id} />
+                  <label>
+                    Replaced on
+                    <input type="date" name="on" value={todayStr} max={todayStr} />
+                  </label>
+                  <label>
+                    New brand / model
+                    <input name="label" placeholder={c.label ?? ''} />
+                  </label>
+                  <button type="submit">Replace</button>
+                </form>
+                <form method="post" class="form-grid">
+                  <input type="hidden" name="intent" value="edit" />
+                  <input type="hidden" name="component_id" value={c.id} />
+                  <label>
+                    Brand / model
+                    <input name="label" value={c.label ?? ''} />
+                  </label>
+                  {!isBatteryKind(c.kind) && (
+                    <label>
+                      Lifespan (km)
+                      <input name="lifespan_km" type="number" min="0" inputmode="numeric" value={c.lifespan_km ?? ''} />
+                    </label>
+                  )}
+                  <label>
+                    Lifespan (days)
+                    <input name="lifespan_days" type="number" min="0" inputmode="numeric" value={c.lifespan_days ?? ''} />
+                  </label>
+                  {!isBatteryKind(c.kind) && (
+                    <label>
+                      Service every (km)
+                      <input name="service_interval_km" type="number" min="0" inputmode="numeric" value={c.service_interval_km ?? ''} />
+                    </label>
+                  )}
+                  <label>
+                    Battery
+                    <input name="battery_type" value={c.battery_type ?? ''} placeholder="e.g. CR2032" />
+                  </label>
+                  <label>
+                    Battery life (hours of riding)
+                    <input name="battery_interval_hours" type="number" min="0" inputmode="numeric" value={c.battery_interval_hours ?? ''} />
+                  </label>
+                  <label>
+                    Notes
+                    <input name="notes" value={c.notes ?? ''} />
+                  </label>
+                  <button type="submit" class="secondary">Save changes</button>
+                </form>
+                <div class="inline-form spaced">
+                  <form method="post" class="inline-form">
+                    <input type="hidden" name="intent" value="remove" />
+                    <input type="hidden" name="component_id" value={c.id} />
+                    <label>
+                      Removed on (without replacement)
+                      <input type="date" name="on" value={todayStr} max={todayStr} />
+                    </label>
+                    <button type="submit" class="secondary">Remove</button>
+                  </form>
+                  <form method="post" data-confirm="Delete this component and forget its history?">
+                    <input type="hidden" name="intent" value="delete" />
+                    <input type="hidden" name="component_id" value={c.id} />
+                    <button type="submit" class="danger">Delete (mistake)</button>
+                  </form>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      ))
+    }
+  </section>
+
+  <section class="card">
+    <h2>Add component</h2>
+    <form method="post" class="form-grid" id="add-form" data-presets={JSON.stringify(COMPONENT_KINDS)}>
+      <input type="hidden" name="intent" value="add" />
+      <label>
+        Type
+        <select name="kind" required>
+          {kinds.map(([key, p]) => <option value={key}>{p.label}</option>)}
+        </select>
+      </label>
+      <label>
+        Brand / model
+        <input name="label" placeholder="e.g. Shimano CN-M8100" />
+      </label>
+      <label>
+        Installed on
+        <input type="date" name="installed_on" value={todayStr} max={todayStr} />
+      </label>
+      <label data-km>
+        Already used (km)
+        <input name="initial_km" type="number" min="0" inputmode="numeric" value="0" />
+      </label>
+      <label data-km>
+        Lifespan (km)
+        <input name="lifespan_km" id="add-lifespan_km" type="number" min="0" />
+      </label>
+      <label>
+        Lifespan (days)
+        <input name="lifespan_days" id="add-lifespan_days" type="number" min="0" />
+      </label>
+      <label data-km>
+        Service every (km)
+        <input name="service_interval_km" id="add-service_interval_km" type="number" min="0" />
+      </label>
+      <label>
+        Battery
+        <input name="battery_type" placeholder="e.g. CR2032" />
+      </label>
+      <label>
+        Battery life (hours of riding)
+        <input name="battery_interval_hours" id="add-battery_interval_hours" type="number" min="0" />
+      </label>
+      <label>
+        Notes
+        <input name="notes" />
+      </label>
+      <button type="submit">Add</button>
+    </form>
+    <p class="muted small">
+      For a past install date, the distance ridden since then is calculated from your Strava activities on this bike.
+      Electronic parts (shifters, derailleur, power meter, sensors) are tracked by battery only: battery life counts the hours ridden on this bike since the last change, not kilometres.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Log</h2>
+    <form method="post" class="inline-form">
+      <input type="hidden" name="intent" value="note" />
+      <label>
+        Date
+        <input type="date" name="on" value={todayStr} max={todayStr} />
+      </label>
+      <label class="grow">
+        Note
+        <input name="description" required placeholder="e.g. Trued rear wheel, bled brakes…" />
+      </label>
+      <button type="submit" class="secondary">Add note</button>
+    </form>
+    {
+      events.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Odometer</th>
+              <th>Event</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {events.map((e) => (
+              <tr>
+                <td>{e.happened_on}</td>
+                <td>{e.odometer_m != null ? formatKm(e.odometer_m / 1000) : ''}</td>
+                <td>{e.description}</td>
+                <td>
+                  <form method="post" data-confirm="Delete this log entry?">
+                    <input type="hidden" name="intent" value="delete_event" />
+                    <input type="hidden" name="event_id" value={e.id} />
+                    <button type="submit" class="link" aria-label="Delete entry">✕</button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )
+    }
+  </section>
+
+  {
+    removed.length > 0 && (
+      <section class="card">
+        <h2>Replaced / removed parts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Part</th>
+              <th>Installed</th>
+              <th>Removed</th>
+              <th>Distance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {removed.map((c) => (
+              <tr>
+                <td>
+                  {kindLabel(c.kind)} {c.label && <span class="muted">{c.label}</span>}
+                </td>
+                <td>{c.installed_on}</td>
+                <td>{c.removed_on}</td>
+                <td>{formatKm(componentStatus(c, bike.odometer_m).km)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    )
+  }
+</Layout>
+
+<script>
+  const form = document.querySelector<HTMLFormElement>('#add-form');
+  if (form) {
+    const presets = JSON.parse(form.dataset.presets ?? '{}');
+    // Avoids HTMLSelectElement: the Workers runtime types redefine the global Element and clash with it.
+    const set = (name: string, value?: number) => {
+      (document.getElementById(`add-${name}`) as HTMLInputElement).value = value == null ? '' : String(value);
+    };
+    const apply = () => {
+      const p = presets[String(new FormData(form).get('kind'))] ?? {};
+      set('lifespan_km', p.lifespanKm);
+      set('lifespan_days', p.lifespanDays);
+      set('service_interval_km', p.serviceIntervalKm);
+      set('battery_interval_hours', p.batteryHours);
+      // Battery parts are tracked in hours only: hide (and so don't submit) the kilometre fields.
+      const battery = p.batteryHours != null;
+      form.querySelectorAll<HTMLElement>('[data-km]').forEach((label) => {
+        label.hidden = battery;
+        label.querySelector('input')!.disabled = battery;
+      });
+    };
+    form.addEventListener('change', (e) => {
+      if ((e.target as HTMLInputElement).name === 'kind') apply();
+    });
+    apply();
+  }
+
+  document.querySelectorAll<HTMLFormElement>('form[data-confirm]').forEach((f) =>
+    f.addEventListener('submit', (e) => {
+      if (!confirm(f.dataset.confirm)) e.preventDefault();
+    }),
+  );
+</script>
+
+<style>
+  section {
+    margin-bottom: 1.25rem;
+  }
+  .component {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  /* Closed, "More…" sits next to the quick action; open, it takes the full width. */
+  .more[open] {
+    flex-basis: 100%;
+  }
+  .more > summary {
+    padding: 0.4rem 0;
+  }
+  .more-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 0.75rem 0 0.25rem;
+  }
+  .small {
+    font-size: 0.8rem;
+  }
+  .grow {
+    flex: 3 1 240px;
+  }
+  .spaced {
+    margin-top: 0.75rem;
+    justify-content: space-between;
+  }
+  table {
+    margin-top: 1rem;
+  }
+</style>

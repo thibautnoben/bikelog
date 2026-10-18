@@ -1,0 +1,131 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ActivityList from '../components/ActivityList.astro';
+import { listBikes, listCommutes, type Activity } from '../lib/db';
+import { formatKm } from '../lib/components';
+import { formatHours, monthLabel } from '../lib/periods';
+import { syncStrava } from '../lib/sync';
+
+const athlete = Astro.locals.athlete!;
+let error: string | null = null;
+try {
+  await syncStrava(athlete, false, (p) => Astro.locals.cfContext.waitUntil(p));
+} catch (e) {
+  error = `Could not sync with Strava: ${e instanceof Error ? e.message : e}`;
+}
+
+const [commutes, bikes] = await Promise.all([listCommutes(athlete.id), listBikes(athlete.id)]);
+const bikeNames = new Map(bikes.map((b) => [b.id, b.name]));
+
+interface Month {
+  key: string; // YYYY-MM, in the athlete's local time
+  label: string;
+  rides: Activity[];
+  distance: number;
+  time: number;
+  byBike: Map<string, number>;
+}
+const months: Month[] = [];
+for (const a of commutes) {
+  const key = a.start_date_local.slice(0, 7);
+  let m = months.at(-1);
+  if (m?.key !== key) {
+    months.push((m = { key, label: monthLabel(key, 'long'), rides: [], distance: 0, time: 0, byBike: new Map() }));
+  }
+  m.rides.push(a);
+  m.distance += a.distance_m;
+  m.time += a.moving_time_s;
+  const bike = a.gear_id ? (bikeNames.get(a.gear_id) ?? 'Other gear') : 'No bike';
+  m.byBike.set(bike, (m.byBike.get(bike) ?? 0) + a.distance_m);
+}
+
+const year = new Date().getUTCFullYear().toString();
+const thisYear = commutes.filter((a) => a.start_date_local.startsWith(year));
+const yearKm = thisYear.reduce((sum, a) => sum + a.distance_m, 0) / 1000;
+const currentMonth = new Date().toISOString().slice(0, 7);
+const rides = (n: number) => `${n} commute${n === 1 ? '' : 's'}`;
+---
+
+<Layout title="Commutes">
+  <h1>Commutes</h1>
+  {error && <p class="alert">{error}</p>}
+  <p class="muted">
+    Rides marked as commute on Strava, per month.{' '}
+    {thisYear.length > 0 && <>This year: <strong>{rides(thisYear.length)}</strong>, {formatKm(yearKm)}.</>}
+  </p>
+  {
+    !athlete.backfill_done && (
+      <p class="muted small">Still importing older rides from Strava; earlier months will appear over the next syncs.</p>
+    )
+  }
+
+  {
+    months.length === 0 ? (
+      <p class="card muted">
+        No commutes yet. Mark rides as commute on Strava, or add a gear rule with “Mark as commute” on the{' '}
+        <a href="/rules">Rules</a> page.
+      </p>
+    ) : (
+      months.map((m) => (
+        <details class="card month" open={m.key === currentMonth || m === months[0]}>
+          <summary>
+            <span class="month-name">{m.label}</span>
+            <span class="month-stats">
+              <strong>{rides(m.rides.length)}</strong> · {formatKm(m.distance / 1000)} · {formatHours(m.time)}
+            </span>
+          </summary>
+          {m.byBike.size > 1 && (
+            <p class="muted small by-bike">
+              {[...m.byBike].map(([name, d]) => `${name}: ${formatKm(d / 1000)}`).join(' · ')}
+            </p>
+          )}
+          <ActivityList activities={m.rides} bikeNames={bikeNames} />
+        </details>
+      ))
+    )
+  }
+</Layout>
+
+<style>
+  .month {
+    margin-bottom: 0.75rem;
+  }
+  .month > summary {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.25rem 1rem;
+    align-items: baseline;
+    color: var(--text);
+    font-size: 1rem;
+    list-style: none;
+  }
+  .month > summary::-webkit-details-marker {
+    display: none;
+  }
+  .month > summary::before {
+    content: '▸';
+    color: var(--muted);
+    margin-right: 0.4rem;
+  }
+  .month[open] > summary::before {
+    content: '▾';
+  }
+  .month-name {
+    font-weight: 700;
+    font-size: 1.1rem;
+    margin-right: auto;
+  }
+  .month-stats {
+    color: var(--muted);
+  }
+  .month[open] > summary {
+    margin-bottom: 0.5rem;
+  }
+  .by-bike {
+    margin: 0 0 0.25rem;
+  }
+  .small {
+    font-size: 0.85rem;
+  }
+</style>

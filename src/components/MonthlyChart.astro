@@ -1,0 +1,234 @@
+---
+import type { RideTotals } from '../lib/db';
+import { formatHours, monthLabel } from '../lib/periods';
+
+interface Props {
+  /** 'YYYY-MM' keys, oldest first; the last one is the current (partial) month. */
+  months: string[];
+  /** One entry per month; undefined when the bike has no rides in this window. */
+  totals: RideTotals[] | undefined;
+  /** Plot height in px, excluding the month labels. */
+  height?: number;
+}
+const { months, totals, height = 110 } = Astro.props;
+
+const km = months.map((_, i) => (totals?.[i]?.distance_m ?? 0) / 1000);
+const hasRides = km.some((v) => v > 0);
+
+/** Smallest "nice" number (1, 2, 2.5, 5 × 10ⁿ) >= value, so the axis ticks are round. */
+function niceCeil(value: number): number {
+  if (value <= 0) return 100;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  return [1, 2, 2.5, 5, 10].map((f) => f * magnitude).find((v) => v >= value)!;
+}
+const max = niceCeil(Math.max(...km));
+const ticks = [0, max / 2, max];
+const compact = (v: number) => (v >= 1000 ? `${+(v / 1000).toFixed(1)}K` : `${Math.round(v)}`);
+const pct = (v: number) => (v / max) * 100;
+const last = months.length - 1;
+
+const describe = (i: number) => {
+  const t = totals?.[i];
+  const rides = t?.rides ?? 0;
+  return {
+    month: monthLabel(months[i], 'long') + (i === last ? ' (so far)' : ''),
+    km: `${Math.round(km[i]).toLocaleString('en-GB')} km`,
+    detail: `${formatHours(t?.moving_time_s ?? 0)} · ${rides} ride${rides === 1 ? '' : 's'}`,
+  };
+};
+---
+
+<figure class="chart">
+  <figcaption class="muted caption">Kilometres per month</figcaption>
+  {
+    !hasRides ? (
+      <p class="muted empty">No rides in the last {months.length} months.</p>
+    ) : (
+      <>
+        <div class="plot" style={`height:${height}px`} aria-hidden="true">
+          {ticks.map((t) => (
+            <div class="grid" style={`bottom:${pct(t)}%`}>
+              <span>{compact(t)}</span>
+            </div>
+          ))}
+          <div class="cols">
+            {months.map((_, i) => {
+              const d = describe(i);
+              const align = i < 2 ? 'start' : i > last - 2 ? 'end' : 'center';
+              return (
+                <div class:list={['col', `tip-${align}`]} tabindex="0">
+                  {km[i] > 0 && <div class="bar" style={`height:max(2px, ${pct(km[i])}%)`} />}
+                  {i === last && km[i] > 0 && (
+                    <span class="cap" style={`bottom:${pct(km[i])}%`}>
+                      {Math.round(km[i])}
+                    </span>
+                  )}
+                  <div class="tip" role="tooltip">
+                    <strong>{d.km}</strong>
+                    <span>{d.month}</span>
+                    <span class="muted">{d.detail}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div class="months" aria-hidden="true">
+          {months.map((m) => (
+            <span>{new Date(`${m}-01T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' })}</span>
+          ))}
+        </div>
+        {/* Wrapped: browsers ignore overflow on <table>, so its caption would still show. */}
+        <div class="sr-only">
+        <table>
+          <caption>Kilometres, riding time and rides per month</caption>
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Distance</th>
+              <th>Time and rides</th>
+            </tr>
+          </thead>
+          <tbody>
+            {months.map((_, i) => {
+              const d = describe(i);
+              return (
+                <tr>
+                  <td>{d.month}</td>
+                  <td>{d.km}</td>
+                  <td>{d.detail}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        </div>
+      </>
+    )
+  }
+</figure>
+
+<style>
+  .chart {
+    margin: 0.75rem 0;
+    --axis-w: 2.25rem;
+  }
+  .caption {
+    font-size: 0.8rem;
+    margin-bottom: 1.1rem; /* room for the value label above the tallest bar */
+  }
+  .empty {
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0;
+  }
+  .plot {
+    position: relative;
+    margin-left: var(--axis-w);
+  }
+  /* Hairline, solid, recessive gridlines with their tick on the left. */
+  .grid {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--border);
+  }
+  .grid span {
+    position: absolute;
+    right: calc(100% + 0.4rem);
+    transform: translateY(-50%);
+    font-size: 0.7rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .cols {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+  }
+  /* The whole column is the hit target, not just the painted bar. */
+  .col {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: flex-end;
+    outline: none;
+    cursor: default;
+  }
+  .bar {
+    width: min(24px, 60%);
+    background: var(--accent);
+    border-radius: 4px 4px 0 0;
+    transition: filter 0.1s;
+  }
+  .cap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    margin-bottom: 0.15rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .col:hover .bar,
+  .col:focus-visible .bar {
+    filter: brightness(1.15);
+  }
+  .col:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-radius: 4px;
+  }
+  .tip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 0.4rem);
+    z-index: 5;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.45rem 0.6rem;
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.15);
+    font-size: 0.8rem;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .tip strong {
+    font-size: 0.95rem;
+  }
+  .tip-start .tip {
+    left: 0;
+  }
+  .tip-end .tip {
+    right: 0;
+  }
+  .tip-center .tip {
+    left: 50%;
+    transform: translateX(-50%);
+  }
+  .col:hover .tip,
+  .col:focus .tip {
+    display: flex;
+  }
+  .months {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    margin-left: var(--axis-w);
+    margin-top: 0.3rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-align: center;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+</style>

@@ -1,0 +1,33 @@
+{
+  "name": "bikelog",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro build && wrangler dev",
+    "deploy": "astro build && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply bikelog --local",
+    "db:migrate:remote": "wrangler d1 migrations apply bikelog --remote",
+    "check": "astro check",
+    "test:budget": "astro build && node scripts/perf/budget.mjs",
+    "test:perf": "node scripts/perf/lighthouse.mjs",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.3.4",
+    "astro": "^7.3.8"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "chrome-launcher": "^1.2.2",
+    "lighthouse": "^13.5.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.149.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261006.1": true
+  }
+}

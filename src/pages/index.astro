@@ -1,0 +1,139 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ComponentRow from '../components/ComponentRow.astro';
+import MonthlyChart from '../components/MonthlyChart.astro';
+import {
+  activeComponentsForAthlete,
+  batteryRideSeconds,
+  listBikes,
+  monthlyTotalsByGear,
+  type Component,
+  type RideTotals,
+} from '../lib/db';
+import { lastMonths } from '../lib/periods';
+import { componentStatus, formatKm } from '../lib/components';
+import { syncStrava } from '../lib/sync';
+
+const athlete = Astro.locals.athlete;
+
+const loginErrors: Record<string, string> = {
+  denied: 'Strava access was not granted.',
+  state: 'The login session expired, please try again.',
+  scope: 'Please allow access to your profile (bikes) and all activities so ridden distances can be calculated.',
+  forbidden: 'This Strava account is not allowed to use this site.',
+};
+const loginError = loginErrors[Astro.url.searchParams.get('error') ?? ''];
+
+let syncError: string | null = null;
+let bikes: Awaited<ReturnType<typeof listBikes>> = [];
+const byBike = new Map<string, Component[]>();
+const months = lastMonths(6);
+let totals = new Map<string, RideTotals[]>();
+let batterySeconds = new Map<number, number>();
+
+if (athlete) {
+  try {
+    await syncStrava(athlete, false, (p) => Astro.locals.cfContext.waitUntil(p));
+  } catch (e) {
+    syncError = e instanceof Error ? e.message : String(e);
+  }
+  // Independent queries: run them in parallel so the page waits for one D1 round trip, not four.
+  let components: Component[];
+  [bikes, components, totals, batterySeconds] = await Promise.all([
+    listBikes(athlete.id),
+    activeComponentsForAthlete(athlete.id),
+    monthlyTotalsByGear(athlete.id, months),
+    batteryRideSeconds(athlete.id),
+  ]);
+  for (const c of components) {
+    byBike.set(c.bike_id, [...(byBike.get(c.bike_id) ?? []), c]);
+  }
+}
+
+const urgency = (c: Component, odo: number) => componentStatus(c, odo, batterySeconds.get(c.id)).ratio ?? -1;
+const activeBikes = bikes.filter((b) => !b.retired);
+const retiredBikes = bikes.filter((b) => b.retired);
+---
+
+<Layout>
+  {
+    !athlete ? (
+      <section class="card hero">
+        <h1>Keep your bikes rolling</h1>
+        <p class="muted">
+          Track wear on chains, tires, brake pads and other consumables across all your bikes. Kilometres are pulled
+          automatically from Strava.
+        </p>
+        {loginError && <p class="alert">{loginError}</p>}
+        <a class="button" href="/auth/login">Connect with Strava</a>
+      </section>
+    ) : (
+      <>
+        {syncError && <p class="alert">Could not sync with Strava: {syncError}</p>}
+        <h1>Your bikes</h1>
+        {activeBikes.length === 0 && (
+          <p class="card muted">
+            No bikes found. Add your bikes in Strava (Settings → My Gear), then press “Sync Strava”.
+          </p>
+        )}
+        <div class="grid">
+          {activeBikes.map((bike) => {
+            const comps = (byBike.get(bike.id) ?? []).sort(
+              (a, b) => urgency(b, bike.odometer_m) - urgency(a, bike.odometer_m),
+            );
+            return (
+              <article class="card">
+                <h2>
+                  <a href={`/bikes/${bike.id}`}>{bike.name}</a>
+                </h2>
+                <p class="muted odometer">{formatKm(bike.odometer_m / 1000)} total</p>
+                <MonthlyChart months={months} totals={totals.get(bike.id)} />
+                {comps.length === 0 ? (
+                  <p class="muted">
+                    No components tracked yet. <a href={`/bikes/${bike.id}`}>Add some →</a>
+                  </p>
+                ) : (
+                  comps.map((c) => (
+                    <ComponentRow component={c} odometerM={bike.odometer_m} batterySeconds={batterySeconds.get(c.id)} />
+                  ))
+                )}
+              </article>
+            );
+          })}
+        </div>
+        {retiredBikes.length > 0 && (
+          <details>
+            <summary>Retired bikes ({retiredBikes.length})</summary>
+            <ul>
+              {retiredBikes.map((b) => (
+                <li>
+                  <a href={`/bikes/${b.id}`}>{b.name}</a> <span class="muted">{formatKm(b.odometer_m / 1000)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </>
+    )
+  }
+</Layout>
+
+<style>
+  .hero {
+    max-width: 560px;
+    margin: 3rem auto;
+    text-align: center;
+  }
+  h2 {
+    margin: 0;
+  }
+  .odometer {
+    margin: 0.25rem 0 0;
+  }
+  h2 a {
+    text-decoration: none;
+  }
+  details {
+    margin-top: 2rem;
+  }
+</style>

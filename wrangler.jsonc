@@ -1,0 +1,23 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "bikelog",
+	"compatibility_date": "2026-10-01",
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "bikelog",
+			// Replace with the id printed by `npx wrangler d1 create bikelog`
+			"database_id": "23cb2bf7-9336-401d-a7a8-a08084f074ed",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		// Comma-separated Strava athlete ids allowed to sign in. Empty = anyone with a Strava account.
+		"ALLOWED_ATHLETE_IDS": ""
+	}
+	// Secrets (set with `npx wrangler secret put <NAME>`):
+	//   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, SESSION_SECRET, STRAVA_WEBHOOK_TOKEN
+}
