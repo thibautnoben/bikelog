@@ -317,6 +317,19 @@ export async function markStale(athleteId: number): Promise<void> {
   await db().prepare('UPDATE athletes SET last_synced_at = NULL WHERE id = ?').bind(athleteId).run();
 }
 
+/** Marks a sync as started now, unless one started after `staleBefore`. False when another sync holds it. */
+export async function claimSync(athleteId: number, staleBefore: number): Promise<boolean> {
+  const { meta } = await db()
+    .prepare('UPDATE athletes SET last_synced_at = ?2 WHERE id = ?1 AND (last_synced_at IS NULL OR last_synced_at < ?3)')
+    .bind(athleteId, Math.floor(Date.now() / 1000), staleBefore)
+    .run();
+  return meta.changes > 0;
+}
+
+export async function setLastSynced(athleteId: number, at: number | null): Promise<void> {
+  await db().prepare('UPDATE athletes SET last_synced_at = ?2 WHERE id = ?1').bind(athleteId, at).run();
+}
+
 /** Called when the athlete revokes access on Strava: gear rules can no longer write. */
 export async function clearScope(athleteId: number): Promise<void> {
   await db().prepare("UPDATE athletes SET scope = '' WHERE id = ?").bind(athleteId).run();

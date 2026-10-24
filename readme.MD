@@ -148,6 +148,11 @@ and gets their own separate data.
   (bike form presets, rules page) are inlined by Astro, so there are no JS requests at all. Should an
   interactive component ever be needed, add it as an island with `client:visible`/`client:idle`;
   `test:budget` keeps its bundle in check.
+- Pages never wait for Strava: they render from D1 and a stale sync (older than 30 minutes) runs in the
+  background via `waitUntil`, so the data is at most one page load behind. Only a first import with nothing
+  stored yet, the login callback and **Sync** wait for it. The rule-queue check also runs after the response.
+- The service worker uses navigation preload, so on a cold app start the page request doesn't wait for the
+  worker to boot.
 - Each page loads its independent D1 queries in parallel. The `Server-Timing` response header shows the
   server's share of the time to first byte.
 - JetBrains Mono is self-hosted through Astro's Fonts API (`astro.config.mjs`): hashed and cached

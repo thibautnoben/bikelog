@@ -1,5 +1,13 @@
 import type { Athlete, Bike } from './db';
-import { newestActivityDate, oldestActivityDate, replaceBikes, setBackfillDone, upsertActivities } from './db';
+import {
+  claimSync,
+  newestActivityDate,
+  oldestActivityDate,
+  replaceBikes,
+  setBackfillDone,
+  setLastSynced,
+  upsertActivities,
+} from './db';
 import { accessToken, activitiesBefore, distanceSince, fetchBikes, recentActivities } from './strava';
 import { today } from './components';
 
@@ -14,8 +22,9 @@ const BACKFILL_PAGES_PER_SYNC = 5;
 
 /**
  * Pulls bike odometers and new activities from Strava. Skipped when synced recently unless `force` is set.
- * Older history is imported via `waitUntil` so page loads don't wait for it; only the very first
- * import runs inline, so a fresh login shows data straight away.
+ * With `waitUntil`, a page load renders from stored data and the sync runs in the background; only an
+ * athlete with nothing stored yet waits, so the first page isn't empty. Older history is imported via
+ * `waitUntil` too, so a forced sync (login, Sync button) only waits for new activities and bikes.
  */
 export async function syncStrava(
   athlete: Athlete,
@@ -24,10 +33,32 @@ export async function syncStrava(
 ): Promise<void> {
   const fresh = athlete.last_synced_at && Date.now() / 1000 - athlete.last_synced_at < STALE_AFTER_SECONDS;
   if (fresh && !force) return;
+  if (!force && waitUntil && (athlete.last_synced_at || athlete.backfill_done)) {
+    waitUntil(backgroundSync(athlete).catch((e) => console.error('Background sync failed:', e)));
+    return;
+  }
+  await runSync(athlete, waitUntil);
+}
+
+/** Claims the sync first, so page loads and prefetches arriving meanwhile don't start their own. */
+async function backgroundSync(athlete: Athlete): Promise<void> {
+  const previous = athlete.last_synced_at;
+  if (!(await claimSync(athlete.id, Math.floor(Date.now() / 1000) - STALE_AFTER_SECONDS))) return;
+  try {
+    await runSync(athlete);
+  } catch (e) {
+    // Release the claim so the next page load retries instead of waiting out the stale period.
+    await setLastSynced(athlete.id, previous);
+    throw e;
+  }
+}
+
+async function runSync(athlete: Athlete, waitUntil?: (promise: Promise<unknown>) => void): Promise<void> {
   const token = await accessToken(athlete);
 
-  if (await newestActivityDate(athlete.id)) {
-    await syncNewActivities(athlete.id, token);
+  const newest = await newestActivityDate(athlete.id);
+  if (newest) {
+    await syncNewActivities(athlete.id, token, newest);
     if (!athlete.backfill_done) {
       const backfill = backfillActivities(athlete, token).catch((e) => console.error('History import failed:', e));
       if (waitUntil) waitUntil(backfill);
@@ -44,15 +75,14 @@ export async function syncStrava(
  * Stores new activities. Recent ones are re-fetched too (the overlap window), so gear or the
  * commute flag changed on Strava after upload is picked up.
  */
-async function syncNewActivities(athleteId: number, token: string): Promise<void> {
-  const newest = await newestActivityDate(athleteId);
-  const cutoff = newest ? new Date(Date.parse(newest) - OVERLAP_DAYS * 86_400_000).toISOString() : null;
+async function syncNewActivities(athleteId: number, token: string, newest: string): Promise<void> {
+  const cutoff = new Date(Date.parse(newest) - OVERLAP_DAYS * 86_400_000).toISOString();
 
   for (let page = 1; page <= MAX_INCREMENTAL_PAGES; page++) {
     const activities = await recentActivities(token, ACTIVITIES_PER_PAGE, page);
     await upsertActivities(athleteId, activities);
     if (activities.length < ACTIVITIES_PER_PAGE) break;
-    if (cutoff && activities[activities.length - 1].start_date < cutoff) break;
+    if (activities[activities.length - 1].start_date < cutoff) break;
   }
 }
 

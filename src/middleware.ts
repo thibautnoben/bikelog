@@ -29,14 +29,19 @@ export const onRequest = defineMiddleware(async (context, next) => {
     // Responses such as Response.redirect() have immutable headers; skip the timing for those.
   }
 
-  // Keep an "apply rules to past rides" run moving in the background while the app is used.
-  if (athlete && context.request.method === 'GET' && context.url.pathname !== '/rules/job') {
-    const pausedUntil = athlete.rule_job_paused_until ?? 0;
-    if (pausedUntil < Date.now() / 1000 && (await ruleJobProgress(athlete.id))?.pending) {
-      context.locals.cfContext.waitUntil(
-        processRuleJob(athlete.id, 20_000).catch((e) => console.error('Rule job failed:', e)),
-      );
-    }
+  // Keep an "apply rules to past rides" run moving in the background while the app is used. The
+  // pending check runs in the background too, so the response doesn't wait for its D1 round trip.
+  const pausedUntil = athlete?.rule_job_paused_until ?? 0;
+  if (
+    athlete &&
+    context.request.method === 'GET' &&
+    context.url.pathname !== '/rules/job' &&
+    pausedUntil < Date.now() / 1000
+  ) {
+    const run = async () => {
+      if ((await ruleJobProgress(athlete.id))?.pending) await processRuleJob(athlete.id, 20_000);
+    };
+    context.locals.cfContext.waitUntil(run().catch((e) => console.error('Rule job failed:', e)));
   }
   return response;
 });
