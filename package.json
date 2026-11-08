@@ -16,15 +16,15 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^14.4.2",
-    "astro": "^7.3.8"
+    "@astrojs/cloudflare": "^14.4.3",
+    "astro": "^7.4.4"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
     "chrome-launcher": "^1.2.2",
-    "lighthouse": "^13.5.0",
+    "lighthouse": "^13.6.0",
     "typescript": "^6.0.3",
-    "wrangler": "^4.152.0"
+    "wrangler": "^4.156.0"
   },
   "allowScripts": {
     "esbuild": true,
