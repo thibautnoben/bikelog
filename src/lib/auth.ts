@@ -30,23 +30,22 @@ export function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /** Cookie value: `<athleteId>.<expiresAt>.<signature>` */
-export async function createSessionValue(athleteId: number): Promise<{ value: string; maxAge: number }> {
+export async function createSessionValue(athleteId: string): Promise<{ value: string; maxAge: number }> {
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
   const payload = `${athleteId}.${expiresAt}`;
   return { value: `${payload}.${await hmac(payload)}`, maxAge: SESSION_TTL_SECONDS };
 }
 
-export async function readSessionValue(value: string | undefined): Promise<number | null> {
+export async function readSessionValue(value: string | undefined): Promise<string | null> {
   if (!value) return null;
   const [id, exp, sig] = value.split('.');
   if (!id || !exp || !sig) return null;
   if (Number(exp) < Date.now() / 1000) return null;
   if (!timingSafeEqual(sig, await hmac(`${id}.${exp}`))) return null;
-  const athleteId = Number(id);
-  return Number.isSafeInteger(athleteId) ? athleteId : null;
+  return /^\d+$/.test(id) ? id : null;
 }
 
-export function isAthleteAllowed(athleteId: number): boolean {
+export function isAthleteAllowed(athleteId: string): boolean {
   const allowed = (env.ALLOWED_ATHLETE_IDS ?? '')
     .split(',')
     .map((s) => s.trim())

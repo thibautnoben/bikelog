@@ -13,7 +13,7 @@ export interface StravaTokenResponse {
   access_token: string;
   refresh_token: string;
   expires_at: number;
-  athlete?: { id: number; firstname?: string; lastname?: string };
+  athlete?: { id: string; id_str?: string; firstname?: string; lastname?: string };
 }
 
 export interface StravaGear {
@@ -25,7 +25,8 @@ export interface StravaGear {
 }
 
 export interface StravaActivity {
-  id: number;
+  id: string;
+  id_str?: string;
   name: string;
   sport_type: string;
   start_date: string;
@@ -78,7 +79,12 @@ async function tokenRequest(body: Record<string, string>): Promise<StravaTokenRe
 }
 
 export function exchangeCode(code: string): Promise<StravaTokenResponse> {
-  return tokenRequest({ code, grant_type: 'authorization_code' });
+  return tokenRequest({ code, grant_type: 'authorization_code' }).then((token) => {
+    if (token.athlete) {
+      token.athlete.id = stravaId(token.athlete.id, token.athlete.id_str);
+    }
+    return token;
+  });
 }
 
 /** Returns a valid access token, refreshing (and persisting) it when it is about to expire. */
@@ -126,7 +132,25 @@ async function api<T>(token: string, path: string, init?: RequestInit): Promise<
   });
   if (res.status === 429) throw new RateLimitError(rateLimitReset(res.headers));
   if (!res.ok) throw new Error(`Strava API ${path} failed (${res.status})`);
-  return res.json();
+  const value = await res.json<T>();
+  return normalizeStravaIds(value);
+}
+
+/** Prefer Strava's string identifier so 64-bit values never pass through JavaScript numbers. */
+export function stravaId(id: string | number | null | undefined, idStr?: string | null): string {
+  if (idStr) return idStr;
+  return String(id ?? '');
+}
+
+function normalizeStravaIds<T>(value: T): T {
+  if (Array.isArray(value)) {
+    for (const item of value) normalizeStravaIds(item);
+  } else if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if ('id' in record) record.id = stravaId(record.id as string | number, record.id_str as string | undefined);
+    if ('bikes' in record) normalizeStravaIds(record.bikes);
+  }
+  return value;
 }
 
 export async function fetchBikes(token: string): Promise<StravaGear[]> {
@@ -149,7 +173,7 @@ export async function distanceSince(token: string, gearId: string, sinceEpoch: n
   return total;
 }
 
-export function getActivity(token: string, id: number): Promise<StravaActivity> {
+export function getActivity(token: string, id: string): Promise<StravaActivity> {
   return api<StravaActivity>(token, `/activities/${id}`);
 }
 
@@ -187,7 +211,7 @@ export interface ActivityChanges {
 }
 
 /** Updates an activity and returns Strava's updated (detailed) activity. */
-export function updateActivity(token: string, id: number, changes: ActivityChanges): Promise<StravaActivity> {
+export function updateActivity(token: string, id: string, changes: ActivityChanges): Promise<StravaActivity> {
   return api<StravaActivity>(token, `/activities/${id}`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },

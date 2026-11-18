@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import type { StravaActivity } from './strava';
 
 export interface Athlete {
-  id: number;
+  id: string;
   firstname: string | null;
   lastname: string | null;
   access_token: string;
@@ -16,7 +16,7 @@ export interface Athlete {
 
 export interface Bike {
   id: string;
-  athlete_id: number;
+  athlete_id: string;
   name: string;
   odometer_m: number;
   is_primary: number;
@@ -58,7 +58,7 @@ export interface MaintenanceEvent {
 const db = () => env.DB;
 
 export async function upsertAthlete(a: {
-  id: number;
+  id: string;
   firstname?: string;
   lastname?: string;
   access_token: string;
@@ -79,19 +79,22 @@ export async function upsertAthlete(a: {
     .run();
 }
 
-export async function saveTokens(id: number, access: string, refresh: string, expiresAt: number): Promise<void> {
+export async function saveTokens(id: string, access: string, refresh: string, expiresAt: number): Promise<void> {
   await db()
     .prepare('UPDATE athletes SET access_token = ?2, refresh_token = ?3, expires_at = ?4 WHERE id = ?1')
     .bind(id, access, refresh, expiresAt)
     .run();
 }
 
-export function getAthlete(id: number): Promise<Athlete | null> {
-  return db().prepare('SELECT * FROM athletes WHERE id = ?').bind(id).first<Athlete>();
+export function getAthlete(id: string): Promise<Athlete | null> {
+  return db()
+    .prepare('SELECT CAST(id AS TEXT) AS id, firstname, lastname, access_token, refresh_token, expires_at, scope, last_synced_at, backfill_done, rule_job_paused_until FROM athletes WHERE id = ?')
+    .bind(id)
+    .first<Athlete>();
 }
 
 export async function replaceBikes(
-  athleteId: number,
+  athleteId: string,
   bikes: { id: string; name: string; distance: number; primary: boolean; retired?: boolean }[],
 ): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -121,19 +124,19 @@ export async function replaceBikes(
   await db().batch(statements);
 }
 
-export async function listBikes(athleteId: number): Promise<Bike[]> {
+export async function listBikes(athleteId: string): Promise<Bike[]> {
   const { results } = await db()
-    .prepare('SELECT * FROM bikes WHERE athlete_id = ? ORDER BY retired, is_primary DESC, name')
+    .prepare('SELECT *, CAST(athlete_id AS TEXT) AS athlete_id FROM bikes WHERE athlete_id = ? ORDER BY retired, is_primary DESC, name')
     .bind(athleteId)
     .all<Bike>();
   return results;
 }
 
-export function getBike(athleteId: number, bikeId: string): Promise<Bike | null> {
+export function getBike(athleteId: string, bikeId: string): Promise<Bike | null> {
   return db().prepare('SELECT * FROM bikes WHERE id = ?1 AND athlete_id = ?2').bind(bikeId, athleteId).first<Bike>();
 }
 
-export async function activeComponentsForAthlete(athleteId: number): Promise<Component[]> {
+export async function activeComponentsForAthlete(athleteId: string): Promise<Component[]> {
   const { results } = await db()
     .prepare(
       `SELECT c.* FROM components c JOIN bikes b ON b.id = c.bike_id
@@ -265,7 +268,7 @@ export async function updateComponent(
  * Riding time (seconds) on the bike since each battery-tracked component's last battery change
  * (or install), keyed by component id. Rides on the change day itself count towards the new battery.
  */
-export async function batteryRideSeconds(athleteId: number, bikeId?: string): Promise<Map<number, number>> {
+export async function batteryRideSeconds(athleteId: string, bikeId?: string): Promise<Map<number, number>> {
   const { results } = await db()
     .prepare(
       `SELECT c.id, COALESCE(SUM(a.moving_time_s), 0) AS seconds
@@ -313,12 +316,12 @@ export async function deleteEvent(bikeId: string, id: number): Promise<void> {
 }
 
 /** Forces the next page load to re-sync odometers, e.g. after gear was moved between bikes. */
-export async function markStale(athleteId: number): Promise<void> {
+export async function markStale(athleteId: string): Promise<void> {
   await db().prepare('UPDATE athletes SET last_synced_at = NULL WHERE id = ?').bind(athleteId).run();
 }
 
 /** Marks a sync as started now, unless one started after `staleBefore`. False when another sync holds it. */
-export async function claimSync(athleteId: number, staleBefore: number): Promise<boolean> {
+export async function claimSync(athleteId: string, staleBefore: number): Promise<boolean> {
   const { meta } = await db()
     .prepare('UPDATE athletes SET last_synced_at = ?2 WHERE id = ?1 AND (last_synced_at IS NULL OR last_synced_at < ?3)')
     .bind(athleteId, Math.floor(Date.now() / 1000), staleBefore)
@@ -326,12 +329,12 @@ export async function claimSync(athleteId: number, staleBefore: number): Promise
   return meta.changes > 0;
 }
 
-export async function setLastSynced(athleteId: number, at: number | null): Promise<void> {
+export async function setLastSynced(athleteId: string, at: number | null): Promise<void> {
   await db().prepare('UPDATE athletes SET last_synced_at = ?2 WHERE id = ?1').bind(athleteId, at).run();
 }
 
 /** Called when the athlete revokes access on Strava: gear rules can no longer write. */
-export async function clearScope(athleteId: number): Promise<void> {
+export async function clearScope(athleteId: string): Promise<void> {
   await db().prepare("UPDATE athletes SET scope = '' WHERE id = ?").bind(athleteId).run();
 }
 
@@ -339,7 +342,7 @@ export async function clearScope(athleteId: number): Promise<void> {
 
 export interface Place {
   id: number;
-  athlete_id: number;
+  athlete_id: string;
   name: string;
   lat: number;
   lng: number;
@@ -350,7 +353,7 @@ export type PowerMeterCondition = 'any' | 'yes' | 'no';
 
 export interface GearRule {
   id: number;
-  athlete_id: number;
+  athlete_id: string;
   position: number;
   name: string | null;
   start_place_id: number | null;
@@ -370,7 +373,7 @@ export type RuleFields = Omit<GearRule, 'id' | 'athlete_id' | 'position' | 'enab
 
 export interface GearAssignment {
   id: number;
-  activity_id: number;
+  activity_id: string;
   activity_name: string | null;
   activity_date: string | null;
   from_gear_id: string | null;
@@ -384,7 +387,7 @@ export interface GearAssignment {
   created_at: number;
 }
 
-export async function listPlaces(athleteId: number): Promise<Place[]> {
+export async function listPlaces(athleteId: string): Promise<Place[]> {
   const { results } = await db()
     .prepare('SELECT * FROM places WHERE athlete_id = ? ORDER BY name')
     .bind(athleteId)
@@ -392,7 +395,7 @@ export async function listPlaces(athleteId: number): Promise<Place[]> {
   return results;
 }
 
-export async function addPlace(athleteId: number, p: Pick<Place, 'name' | 'lat' | 'lng' | 'radius_m'>): Promise<void> {
+export async function addPlace(athleteId: string, p: Pick<Place, 'name' | 'lat' | 'lng' | 'radius_m'>): Promise<void> {
   await db()
     .prepare('INSERT INTO places (athlete_id, name, lat, lng, radius_m) VALUES (?1, ?2, ?3, ?4, ?5)')
     .bind(athleteId, p.name, p.lat, p.lng, p.radius_m)
@@ -400,7 +403,7 @@ export async function addPlace(athleteId: number, p: Pick<Place, 'name' | 'lat' 
 }
 
 /** Returns false when the place is still used by a rule. */
-export async function deletePlace(athleteId: number, id: number): Promise<boolean> {
+export async function deletePlace(athleteId: string, id: number): Promise<boolean> {
   const used = await db()
     .prepare('SELECT 1 FROM gear_rules WHERE athlete_id = ?1 AND (start_place_id = ?2 OR end_place_id = ?2) LIMIT 1')
     .bind(athleteId, id)
@@ -410,7 +413,7 @@ export async function deletePlace(athleteId: number, id: number): Promise<boolea
   return true;
 }
 
-export async function listRules(athleteId: number): Promise<GearRule[]> {
+export async function listRules(athleteId: string): Promise<GearRule[]> {
   const { results } = await db()
     .prepare('SELECT * FROM gear_rules WHERE athlete_id = ? ORDER BY position, id')
     .bind(athleteId)
@@ -418,7 +421,7 @@ export async function listRules(athleteId: number): Promise<GearRule[]> {
   return results;
 }
 
-export async function addRule(athleteId: number, r: RuleFields): Promise<void> {
+export async function addRule(athleteId: string, r: RuleFields): Promise<void> {
   await db()
     .prepare(
       `INSERT INTO gear_rules
@@ -434,7 +437,7 @@ export async function addRule(athleteId: number, r: RuleFields): Promise<void> {
     .run();
 }
 
-export async function updateRule(athleteId: number, id: number, r: RuleFields): Promise<void> {
+export async function updateRule(athleteId: string, id: number, r: RuleFields): Promise<void> {
   await db()
     .prepare(
       `UPDATE gear_rules SET name = ?3, start_place_id = ?4, end_place_id = ?5, power_meter = ?6, sport_type = ?7,
@@ -448,19 +451,19 @@ export async function updateRule(athleteId: number, id: number, r: RuleFields): 
     .run();
 }
 
-export async function setRuleEnabled(athleteId: number, id: number, enabled: boolean): Promise<void> {
+export async function setRuleEnabled(athleteId: string, id: number, enabled: boolean): Promise<void> {
   await db()
     .prepare('UPDATE gear_rules SET enabled = ?3 WHERE id = ?1 AND athlete_id = ?2')
     .bind(id, athleteId, enabled ? 1 : 0)
     .run();
 }
 
-export async function deleteRule(athleteId: number, id: number): Promise<void> {
+export async function deleteRule(athleteId: string, id: number): Promise<void> {
   await db().prepare('DELETE FROM gear_rules WHERE id = ?1 AND athlete_id = ?2').bind(id, athleteId).run();
 }
 
 /** Swaps the rule with its neighbour so it is evaluated earlier (-1) or later (+1). */
-export async function moveRule(athleteId: number, id: number, direction: -1 | 1): Promise<void> {
+export async function moveRule(athleteId: string, id: number, direction: -1 | 1): Promise<void> {
   const rules = await listRules(athleteId);
   const i = rules.findIndex((r) => r.id === id);
   const j = i + direction;
@@ -474,7 +477,7 @@ export async function moveRule(athleteId: number, id: number, direction: -1 | 1)
 }
 
 export async function logAssignment(
-  athleteId: number,
+  athleteId: string,
   a: Omit<GearAssignment, 'id' | 'created_at'>,
 ): Promise<void> {
   await db()
@@ -491,9 +494,9 @@ export async function logAssignment(
     .run();
 }
 
-export async function recentAssignments(athleteId: number, limit = 20): Promise<GearAssignment[]> {
+export async function recentAssignments(athleteId: string, limit = 20): Promise<GearAssignment[]> {
   const { results } = await db()
-    .prepare('SELECT * FROM gear_assignments WHERE athlete_id = ? ORDER BY created_at DESC, id DESC LIMIT ?')
+    .prepare('SELECT *, CAST(activity_id AS TEXT) AS activity_id FROM gear_assignments WHERE athlete_id = ? ORDER BY created_at DESC, id DESC LIMIT ?')
     .bind(athleteId, limit)
     .all<GearAssignment>();
   return results;
@@ -502,8 +505,8 @@ export async function recentAssignments(athleteId: number, limit = 20): Promise<
 // --- Activities -------------------------------------------------------------------------------
 
 export interface Activity {
-  id: number;
-  athlete_id: number;
+  id: string;
+  athlete_id: string;
   gear_id: string | null;
   name: string;
   sport_type: string;
@@ -516,7 +519,7 @@ export interface Activity {
   commute: number;
 }
 
-export async function upsertActivities(athleteId: number, activities: StravaActivity[]): Promise<void> {
+export async function upsertActivities(athleteId: string, activities: StravaActivity[]): Promise<void> {
   if (activities.length === 0) return;
   await db().batch(
     activities.map((a) =>
@@ -542,7 +545,7 @@ export async function upsertActivities(athleteId: number, activities: StravaActi
   );
 }
 
-export async function newestActivityDate(athleteId: number): Promise<string | null> {
+export async function newestActivityDate(athleteId: string): Promise<string | null> {
   const row = await db()
     .prepare('SELECT MAX(start_date) AS d FROM activities WHERE athlete_id = ?')
     .bind(athleteId)
@@ -551,11 +554,11 @@ export async function newestActivityDate(athleteId: number): Promise<string | nu
 }
 
 
-export async function deleteActivity(athleteId: number, id: number): Promise<void> {
+export async function deleteActivity(athleteId: string, id: string): Promise<void> {
   await db().prepare('DELETE FROM activities WHERE id = ?1 AND athlete_id = ?2').bind(id, athleteId).run();
 }
 
-export async function oldestActivityDate(athleteId: number): Promise<string | null> {
+export async function oldestActivityDate(athleteId: string): Promise<string | null> {
   const row = await db()
     .prepare('SELECT MIN(start_date) AS d FROM activities WHERE athlete_id = ?')
     .bind(athleteId)
@@ -564,7 +567,7 @@ export async function oldestActivityDate(athleteId: number): Promise<string | nu
 }
 
 /** Local date (YYYY-MM-DD) of the first stored ride on a bike. */
-export async function firstRideDate(athleteId: number, bikeId: string): Promise<string | null> {
+export async function firstRideDate(athleteId: string, bikeId: string): Promise<string | null> {
   const row = await db()
     .prepare('SELECT MIN(substr(start_date_local, 1, 10)) AS d FROM activities WHERE athlete_id = ?1 AND gear_id = ?2')
     .bind(athleteId, bikeId)
@@ -572,7 +575,7 @@ export async function firstRideDate(athleteId: number, bikeId: string): Promise<
   return row?.d ?? null;
 }
 
-export async function setBackfillDone(athleteId: number): Promise<void> {
+export async function setBackfillDone(athleteId: string): Promise<void> {
   await db().prepare('UPDATE athletes SET backfill_done = 1 WHERE id = ?').bind(athleteId).run();
 }
 
@@ -586,7 +589,7 @@ export interface RideTotals {
  * Ride totals per gear per calendar month (athlete's local time), keyed by gear id.
  * `months` are 'YYYY-MM' keys; the result has one entry per key, in the same order.
  */
-export async function monthlyTotalsByGear(athleteId: number, months: string[]): Promise<Map<string, RideTotals[]>> {
+export async function monthlyTotalsByGear(athleteId: string, months: string[]): Promise<Map<string, RideTotals[]>> {
   const { results } = await db()
     .prepare(
       `SELECT gear_id, substr(start_date_local, 1, 7) AS month, COUNT(*) AS rides,
@@ -609,9 +612,9 @@ export async function monthlyTotalsByGear(athleteId: number, months: string[]): 
   return totals;
 }
 
-export async function listCommutes(athleteId: number): Promise<Activity[]> {
+export async function listCommutes(athleteId: string): Promise<Activity[]> {
   const { results } = await db()
-    .prepare('SELECT * FROM activities WHERE athlete_id = ? AND commute = 1 ORDER BY start_date DESC')
+    .prepare('SELECT *, CAST(id AS TEXT) AS id, CAST(athlete_id AS TEXT) AS athlete_id FROM activities WHERE athlete_id = ? AND commute = 1 ORDER BY start_date DESC')
     .bind(athleteId)
     .all<Activity>();
   return results;
@@ -620,8 +623,8 @@ export async function listCommutes(athleteId: number): Promise<Activity[]> {
 // --- Rule job queue ----------------------------------------------------------------------------
 
 export interface RuleJobItem {
-  athlete_id: number;
-  activity_id: number;
+  athlete_id: string;
+  activity_id: string;
   rule_id: number;
   activity_json: string;
   status: 'pending' | 'working' | 'changed' | 'unchanged' | 'failed';
@@ -639,7 +642,7 @@ export interface RuleJobProgress {
 
 /** Replaces any previous job with these items. */
 export async function enqueueRuleJob(
-  athleteId: number,
+  athleteId: string,
   items: { activity: StravaActivity; ruleId: number }[],
 ): Promise<void> {
   await db().batch([
@@ -657,7 +660,7 @@ export async function enqueueRuleJob(
  * Atomically claims up to `limit` pending items, so concurrent processors never handle the same ride.
  * Items stuck in 'working' for over 2 minutes (a processor that died) are released first.
  */
-export async function claimRuleJobItems(athleteId: number, limit: number): Promise<RuleJobItem[]> {
+export async function claimRuleJobItems(athleteId: string, limit: number): Promise<RuleJobItem[]> {
   const now = Math.floor(Date.now() / 1000);
   await db()
     .prepare("UPDATE rule_job_items SET status = 'pending' WHERE athlete_id = ?1 AND status = 'working' AND claimed_at < ?2")
@@ -670,7 +673,7 @@ export async function claimRuleJobItems(athleteId: number, limit: number): Promi
          SELECT activity_id FROM rule_job_items WHERE athlete_id = ?1 AND status = 'pending'
          ORDER BY activity_id DESC LIMIT ?3
        )
-       RETURNING *`,
+       RETURNING *, CAST(activity_id AS TEXT) AS activity_id, CAST(athlete_id AS TEXT) AS athlete_id`,
     )
     .bind(athleteId, now, limit)
     .all<RuleJobItem>();
@@ -678,8 +681,8 @@ export async function claimRuleJobItems(athleteId: number, limit: number): Promi
 }
 
 export async function finishRuleJobItem(
-  athleteId: number,
-  activityId: number,
+  athleteId: string,
+  activityId: string,
   status: RuleJobItem['status'],
   error: string | null = null,
 ): Promise<void> {
@@ -689,11 +692,11 @@ export async function finishRuleJobItem(
     .run();
 }
 
-export async function pauseRuleJob(athleteId: number, until: number | null): Promise<void> {
+export async function pauseRuleJob(athleteId: string, until: number | null): Promise<void> {
   await db().prepare('UPDATE athletes SET rule_job_paused_until = ?2 WHERE id = ?1').bind(athleteId, until).run();
 }
 
-export async function ruleJobProgress(athleteId: number): Promise<RuleJobProgress | null> {
+export async function ruleJobProgress(athleteId: string): Promise<RuleJobProgress | null> {
   const { results } = await db()
     .prepare('SELECT status, COUNT(*) AS n FROM rule_job_items WHERE athlete_id = ? GROUP BY status')
     .bind(athleteId)
@@ -714,16 +717,16 @@ export async function ruleJobProgress(athleteId: number): Promise<RuleJobProgres
   };
 }
 
-export async function failedRuleJobItems(athleteId: number, limit = 10): Promise<RuleJobItem[]> {
+export async function failedRuleJobItems(athleteId: string, limit = 10): Promise<RuleJobItem[]> {
   const { results } = await db()
-    .prepare("SELECT * FROM rule_job_items WHERE athlete_id = ? AND status = 'failed' LIMIT ?")
+    .prepare("SELECT *, CAST(activity_id AS TEXT) AS activity_id, CAST(athlete_id AS TEXT) AS athlete_id FROM rule_job_items WHERE athlete_id = ? AND status = 'failed' LIMIT ?")
     .bind(athleteId, limit)
     .all<RuleJobItem>();
   return results;
 }
 
 /** Cancel: drops rides that weren't processed yet. Clear: removes the whole (finished) job. */
-export async function cancelRuleJob(athleteId: number, onlyPending: boolean): Promise<void> {
+export async function cancelRuleJob(athleteId: string, onlyPending: boolean): Promise<void> {
   await db()
     .prepare(
       `DELETE FROM rule_job_items WHERE athlete_id = ?1 ${onlyPending ? "AND status IN ('pending', 'working')" : ''}`,

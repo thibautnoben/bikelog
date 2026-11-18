@@ -119,8 +119,8 @@ export async function applyRule(
 
 /** Handles a Strava activity webhook event: stores the activity and applies gear rules to new ones. */
 export async function handleActivityEvent(
-  athleteId: number,
-  activityId: number,
+  athleteId: string,
+  activityId: string,
   aspect: 'create' | 'update' | 'delete',
 ): Promise<void> {
   if (aspect === 'delete') return deleteActivity(athleteId, activityId);

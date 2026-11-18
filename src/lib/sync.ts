@@ -75,7 +75,7 @@ async function runSync(athlete: Athlete, waitUntil?: (promise: Promise<unknown>)
  * Stores new activities. Recent ones are re-fetched too (the overlap window), so gear or the
  * commute flag changed on Strava after upload is picked up.
  */
-async function syncNewActivities(athleteId: number, token: string, newest: string): Promise<void> {
+async function syncNewActivities(athleteId: string, token: string, newest: string): Promise<void> {
   const cutoff = new Date(Date.parse(newest) - OVERLAP_DAYS * 86_400_000).toISOString();
 
   for (let page = 1; page <= MAX_INCREMENTAL_PAGES; page++) {

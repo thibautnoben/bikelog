@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { SESSION_COOKIE, STATE_COOKIE, createSessionValue, isAthleteAllowed } from '../../lib/auth';
 import { getAthlete, upsertAthlete } from '../../lib/db';
-import { REQUIRED_SCOPES, exchangeCode } from '../../lib/strava';
+import { REQUIRED_SCOPES, exchangeCode, stravaId } from '../../lib/strava';
 import { syncStrava } from '../../lib/sync';
 
 export const GET: APIRoute = async ({ url, cookies, redirect, locals }) => {
@@ -17,7 +17,9 @@ export const GET: APIRoute = async ({ url, cookies, redirect, locals }) => {
   if (!REQUIRED_SCOPES.every((s) => granted.includes(s))) return redirect('/?error=scope');
 
   const token = await exchangeCode(code);
-  if (!token.athlete || !isAthleteAllowed(token.athlete.id)) return redirect('/?error=forbidden');
+  if (!token.athlete) return redirect('/?error=forbidden');
+  token.athlete.id = stravaId(token.athlete.id, token.athlete.id_str);
+  if (!isAthleteAllowed(token.athlete.id)) return redirect('/?error=forbidden');
 
   await upsertAthlete({ ...token.athlete, ...token, scope });
   const athlete = await getAthlete(token.athlete.id);

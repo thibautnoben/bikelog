@@ -18,7 +18,7 @@ const BATCH_SIZE = 5;
  * limit is hit (then the queue pauses until the limit resets). Safe to run concurrently: items are
  * claimed atomically. Returns the progress afterwards.
  */
-export async function processRuleJob(athleteId: number, budgetMs: number): Promise<RuleJobProgress | null> {
+export async function processRuleJob(athleteId: string, budgetMs: number): Promise<RuleJobProgress | null> {
   const deadline = Date.now() + budgetMs;
   const athlete = await getAthlete(athleteId);
   if (!athlete) return null;

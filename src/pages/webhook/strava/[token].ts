@@ -16,8 +16,10 @@ function validToken(token: string | undefined): boolean {
 interface StravaEvent {
   object_type: 'activity' | 'athlete';
   aspect_type: 'create' | 'update' | 'delete';
-  object_id: number;
-  owner_id: number;
+  object_id: string;
+  owner_id: string;
+  object_id_str?: string;
+  owner_id_str?: string;
   updates?: Record<string, string>;
 }
 
@@ -41,7 +43,12 @@ export const GET: APIRoute = ({ params, url }) => {
 
 export const POST: APIRoute = async ({ params, request, locals }) => {
   if (!validToken(params.token)) return new Response('Forbidden', { status: 403 });
-  const event = (await request.json()) as StravaEvent;
+  const body = await request.text();
+  const event = JSON.parse(body) as StravaEvent;
+  const rawObjectId = body.match(/"object_id"\s*:\s*"?(\d+)"?/)?.[1];
+  const rawOwnerId = body.match(/"owner_id"\s*:\s*"?(\d+)"?/)?.[1];
+  event.object_id = event.object_id_str ?? rawObjectId ?? String(event.object_id);
+  event.owner_id = event.owner_id_str ?? rawOwnerId ?? String(event.owner_id);
 
   if (event.object_type === 'activity') {
     // Strava expects a response within 2 seconds, so the work continues after responding.

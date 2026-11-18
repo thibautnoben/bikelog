@@ -114,7 +114,7 @@ if (Astro.request.method === 'POST') {
       case 'apply': {
         // Queue the selected rides; they're processed in batches within Strava's rate limits.
         if (!canWrite) throw new Error('Reconnect Strava to allow changing activities.');
-        const selected = new Set(form.getAll('activity_id').map(Number));
+        const selected = new Set(form.getAll('activity_id'));
         const [rules, activities] = await Promise.all([
           listRules(athlete.id),
           activitiesSince(await accessToken(athlete), periodStart(str('period') ?? '30d')),
