@@ -27,6 +27,10 @@ Bikes, kilometres and rides come from Strava; the app runs on Cloudflare Workers
   first sync, then older ones in the background on later syncs. New rides are fetched on every sync,
   and the last 7 days are re-checked so a bike or commute flag changed on Strava afterwards is
   picked up. With the webhook enabled, new, edited and deleted activities are updated immediately.
+- Commutes can be exported as CSV, per month (*Export CSV* under each month) or all at once
+  (`/commutes/export[?month=YYYY-MM]`). Enter an e-mail address under *Monthly e-mail summary* on the
+  Commutes page to receive the commutes of the last 30 days on the 25th of every month (06:00 UTC),
+  with the CSV attached; *Send now* sends it immediately. E-mails go through [Resend](https://resend.com).
 - **Rules** (`/rules`) update a ride automatically when it is uploaded to Strava, based on start
   location, end location, whether a power meter recorded the ride, and the ride type. Each rule
   chooses which fields it changes: bike, commute flag, title, description and/or private note.
@@ -100,6 +104,24 @@ The GitHub repository is connected to the Worker with
 - Builds of other branches (preview versions) would run migrations against the production database.
   Keep them disabled, or use a deploy command without the migration step for those branches.
 - Runtime secrets (`wrangler secret put`) live on the Worker and are not part of the build.
+
+### Monthly commute e-mail (Resend)
+
+`src/worker.ts` is the Worker entrypoint: requests go to Astro, and the cron trigger in
+`wrangler.jsonc` (`0 6 25 * *`) runs `sendMonthlyCommuteReports` in `src/lib/commuteReport.ts`. It
+syncs Strava for every athlete with a report address and e-mails them their summary. Strava doesn't
+share e-mail addresses, so each user enters theirs on the Commutes page.
+
+- The Resend API key is an account-level secret in the Cloudflare Secrets Store, shared with other
+  Workers: `RESEND_API_KEY` in `default_secrets_store`, bound under `secrets_store_secrets` in
+  `wrangler.jsonc` (not `wrangler secret put`). Locally, Wrangler uses a separate local store; add a
+  key there with
+  `npx wrangler secrets-store secret create ec00c6411a61449e97f1d6aadc720908 --name RESEND_API_KEY --scopes workers`.
+- Set `REPORT_FROM_EMAIL` in `wrangler.jsonc`; the sender's domain must be verified in Resend.
+- Runs show under *Workers & Pages → bikelog → Settings → Trigger events*; a failed send fails the
+  run. Resend's idempotency key (athlete + date) keeps a retried cron run from sending twice.
+- To try the cron locally: `npm run build && npx wrangler dev`, then
+  `curl -X POST 'http://localhost:8787/cdn-cgi/local/explorer/api/local/scheduled?worker=bikelog' -H 'Content-Type: application/json' -d '{"cron":"0 6 25 * *"}'`.
 
 ### Enable gear rules (Strava webhook)
 

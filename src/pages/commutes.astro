@@ -1,13 +1,44 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import ActivityList from '../components/ActivityList.astro';
-import { listBikes, listCommutes, type Activity } from '../lib/db';
+import { listBikes, listCommutes, setReportEmail, type Activity } from '../lib/db';
 import { formatKm } from '../lib/components';
 import { formatHours, monthLabel } from '../lib/periods';
 import { syncStrava } from '../lib/sync';
+import { isEmailAddress } from '../lib/email';
+import { sendCommuteReport } from '../lib/commuteReport';
 
 const athlete = Astro.locals.athlete!;
 let error: string | null = null;
+let notice: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const intent = form.get('intent');
+  const email = String(form.get('report_email') ?? '').trim();
+  if (intent === 'save_report' || intent === 'send_report') {
+    if (email && !isEmailAddress(email)) {
+      error = `“${email}” is not a valid e-mail address.`;
+    } else if (email !== (athlete.report_email ?? '')) {
+      await setReportEmail(athlete.id, email || null);
+      athlete.report_email = email || null;
+      notice = email ? `Monthly summary will be sent to ${email}.` : 'Monthly summary turned off.';
+    }
+  }
+  if (!error && intent === 'send_report') {
+    if (!athlete.report_email) {
+      error = 'Enter an e-mail address first.';
+    } else {
+      try {
+        const sent = await sendCommuteReport(athlete, new Date(), { origin: Astro.url.origin });
+        notice = `Summary of ${sent} commute${sent === 1 ? '' : 's'} sent to ${athlete.report_email}.`;
+      } catch (e) {
+        console.error('Commute report failed:', e);
+        error = `Could not send the summary: ${e instanceof Error ? e.message : e}`;
+      }
+    }
+  }
+}
 try {
   await syncStrava(athlete, false, (p) => Astro.locals.cfContext.waitUntil(p));
 } catch (e) {
@@ -49,10 +80,32 @@ const rides = (n: number) => `${n} commute${n === 1 ? '' : 's'}`;
 <Layout title="Commutes">
   <h1>Commutes</h1>
   {error && <p class="alert">{error}</p>}
+  {notice && <p class="notice">{notice}</p>}
   <p class="muted">
     Rides marked as commute on Strava, per month.{' '}
     {thisYear.length > 0 && <>This year: <strong>{rides(thisYear.length)}</strong>, {formatKm(yearKm)}.</>}
+    {commutes.length > 0 && <> <a href="/commutes/export" download>Export all as CSV</a></>}
   </p>
+
+  <details class="card report" open={!!error || !!notice}>
+    <summary>Monthly e-mail summary{athlete.report_email ? ` · ${athlete.report_email}` : ' · off'}</summary>
+    <p class="muted small">
+      On the 25th of every month, the commutes of the last 30 days are e-mailed to this address, with a CSV
+      attached. Leave empty to turn it off.
+    </p>
+    <form method="post" class="report-form">
+      <input
+        type="email"
+        name="report_email"
+        value={athlete.report_email ?? ''}
+        placeholder="you@example.com"
+        autocomplete="email"
+        aria-label="E-mail address"
+      />
+      <button name="intent" value="save_report">Save</button>
+      <button class="secondary" name="intent" value="send_report">Send now</button>
+    </form>
+  </details>
   {
     !athlete.backfill_done && (
       <p class="muted small">Still importing older rides from Strava; earlier months will appear over the next syncs.</p>
@@ -74,11 +127,10 @@ const rides = (n: number) => `${n} commute${n === 1 ? '' : 's'}`;
               <strong>{rides(m.rides.length)}</strong> · {formatKm(m.distance / 1000)} · {formatHours(m.time)}
             </span>
           </summary>
-          {m.byBike.size > 1 && (
-            <p class="muted small by-bike">
-              {[...m.byBike].map(([name, d]) => `${name}: ${formatKm(d / 1000)}`).join(' · ')}
-            </p>
-          )}
+          <p class="muted small by-bike">
+            {m.byBike.size > 1 && <>{[...m.byBike].map(([name, d]) => `${name}: ${formatKm(d / 1000)}`).join(' · ')} · </>}
+            <a href={`/commutes/export?month=${m.key}`} download>Export CSV</a>
+          </p>
           <ActivityList activities={m.rides} bikeNames={bikeNames} />
         </details>
       ))
@@ -127,5 +179,28 @@ const rides = (n: number) => `${n} commute${n === 1 ? '' : 's'}`;
   }
   .small {
     font-size: 0.85rem;
+  }
+  .notice {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--ok);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+  }
+  .report {
+    margin-bottom: 1rem;
+  }
+  .report > summary {
+    color: var(--text);
+  }
+  .report-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .report-form input {
+    flex: 1 1 14rem;
+    min-width: 0;
   }
 </style>

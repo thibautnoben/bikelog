@@ -12,6 +12,7 @@ export interface Athlete {
   scope: string | null;
   backfill_done: number;
   rule_job_paused_until: number | null;
+  report_email: string | null;
 }
 
 export interface Bike {
@@ -88,7 +89,7 @@ export async function saveTokens(id: string, access: string, refresh: string, ex
 
 export function getAthlete(id: string): Promise<Athlete | null> {
   return db()
-    .prepare('SELECT CAST(id AS TEXT) AS id, firstname, lastname, access_token, refresh_token, expires_at, scope, last_synced_at, backfill_done, rule_job_paused_until FROM athletes WHERE id = ?')
+    .prepare('SELECT CAST(id AS TEXT) AS id, firstname, lastname, access_token, refresh_token, expires_at, scope, last_synced_at, backfill_done, rule_job_paused_until, report_email FROM athletes WHERE id = ?')
     .bind(id)
     .first<Athlete>();
 }
@@ -612,11 +613,40 @@ export async function monthlyTotalsByGear(athleteId: string, months: string[]): 
   return totals;
 }
 
-export async function listCommutes(athleteId: string): Promise<Activity[]> {
+/** Commutes, newest first. `since` / `until` are ISO UTC bounds on start_date (inclusive / exclusive). */
+export async function listCommutes(athleteId: string, since = '', until = '9999'): Promise<Activity[]> {
   const { results } = await db()
-    .prepare('SELECT *, CAST(id AS TEXT) AS id, CAST(athlete_id AS TEXT) AS athlete_id FROM activities WHERE athlete_id = ? AND commute = 1 ORDER BY start_date DESC')
-    .bind(athleteId)
+    .prepare(
+      `SELECT *, CAST(id AS TEXT) AS id, CAST(athlete_id AS TEXT) AS athlete_id FROM activities
+       WHERE athlete_id = ?1 AND commute = 1 AND start_date >= ?2 AND start_date < ?3 ORDER BY start_date DESC`,
+    )
+    .bind(athleteId, since, until)
     .all<Activity>();
+  return results;
+}
+
+/** Commutes in one calendar month ('YYYY-MM') of the athlete's local time, oldest first. */
+export async function listCommutesInMonth(athleteId: string, month: string): Promise<Activity[]> {
+  const { results } = await db()
+    .prepare(
+      `SELECT *, CAST(id AS TEXT) AS id, CAST(athlete_id AS TEXT) AS athlete_id FROM activities
+       WHERE athlete_id = ?1 AND commute = 1 AND substr(start_date_local, 1, 7) = ?2 ORDER BY start_date`,
+    )
+    .bind(athleteId, month)
+    .all<Activity>();
+  return results;
+}
+
+// --- Commute report ----------------------------------------------------------------------------
+
+export async function setReportEmail(athleteId: string, email: string | null): Promise<void> {
+  await db().prepare('UPDATE athletes SET report_email = ?1 WHERE id = ?2').bind(email, athleteId).run();
+}
+
+export async function athletesWithReportEmail(): Promise<Athlete[]> {
+  const { results } = await db()
+    .prepare('SELECT *, CAST(id AS TEXT) AS id FROM athletes WHERE report_email IS NOT NULL')
+    .all<Athlete>();
   return results;
 }
 
