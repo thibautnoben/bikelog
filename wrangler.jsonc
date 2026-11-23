@@ -2,6 +2,12 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "bikelog",
 	"compatibility_date": "2026-10-01",
+	// Astro's request handler plus the cron handler below (src/worker.ts).
+	"main": "./src/worker.ts",
+	// 06:00 UTC on the 25th: e-mail the commute summary of the last 30 days (src/lib/commuteReport.ts).
+	"triggers": {
+		"crons": ["0 6 25 * *"]
+	},
 	"observability": {
 		"enabled": true
 	},
@@ -14,9 +20,19 @@
 			"migrations_dir": "migrations"
 		}
 	],
+	// Account-level secrets shared with other Workers (Secrets Store), read with `await env.<BINDING>.get()`.
+	"secrets_store_secrets": [
+		{
+			"binding": "RESEND_API_KEY",
+			"store_id": "ec00c6411a61449e97f1d6aadc720908",
+			"secret_name": "RESEND_API_KEY"
+		}
+	],
 	"vars": {
 		// Comma-separated Strava athlete ids allowed to sign in. Empty = anyone with a Strava account.
-		"ALLOWED_ATHLETE_IDS": ""
+		"ALLOWED_ATHLETE_IDS": "",
+		// Sender of the monthly commute summary; the domain must be verified in Resend.
+		"REPORT_FROM_EMAIL": "Bikelog <bikelog@noben.net>"
 	}
 	// Secrets (set with `npx wrangler secret put <NAME>`):
 	//   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, SESSION_SECRET, STRAVA_WEBHOOK_TOKEN
